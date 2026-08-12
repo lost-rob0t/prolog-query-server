@@ -15,12 +15,14 @@
 :- http_handler(root('v1/explain'), explain_handler, [method(post)]).
 :- http_handler(root('v1/reload'), reload_handler, [method(post)]).
 :- http_handler(root('v1/knowledge'), knowledge_handler, [method(get)]).
+:- http_handler(root('v1/document'), knowledge_document_handler, []).
+:- http_handler(root('v1/bulk'), bulk_handler, [method(post)]).
 :- http_handler(root('v1/releases'), releases_handler, [method(get)]).
 :- http_handler(root('v1/releases/activate'), activate_release_handler, [method(post)]).
 
 index_handler(_Request) :-
     reply_json_dict(_{service:"prolog-query-server",
-                      version:"0.2.0",
+                      version:"0.3.0",
                       storage:"couchdb",
                       engine:"swi-prolog"}).
 
@@ -41,6 +43,41 @@ rules_handler(Request) :-
     api_call(( read_json(Request, Input),
                kb_service:save_rule(Input, Saved),
                reply_json_dict(Saved, [status(201)])
+             )).
+
+knowledge_document_handler(Request) :-
+    memberchk(method(Method), Request),
+    api_call(knowledge_document_method(Method, Request)).
+
+knowledge_document_method(get, Request) :-
+    http_parameters(Request, [id(IdAtom, [])]),
+    atom_string(IdAtom, Id),
+    kb_service:knowledge_document(Id, Document),
+    reply_json_dict(_{document:Document}).
+knowledge_document_method(put, Request) :-
+    read_json(Request, Input),
+    kb_service:put_knowledge_document(Input, Saved),
+    reply_json_dict(Saved).
+knowledge_document_method(patch, Request) :-
+    read_json(Request, Input),
+    kb_service:patch_knowledge_document(Input, Saved),
+    reply_json_dict(Saved).
+knowledge_document_method(delete, Request) :-
+    http_parameters(Request,
+                    [ id(IdAtom, []),
+                      rev(RevisionAtom, [])
+                    ]),
+    atom_string(IdAtom, Id),
+    atom_string(RevisionAtom, Revision),
+    kb_service:delete_knowledge_document(Id, Revision, Saved),
+    reply_json_dict(Saved).
+knowledge_document_method(Method, _Request) :-
+    throw(error(domain_error(knowledge_document_method, Method), _)).
+
+bulk_handler(Request) :-
+    api_call(( read_json(Request, Input),
+               kb_service:bulk_knowledge_documents(Input, Saved),
+               reply_json_dict(Saved)
              )).
 
 query_handler(Request) :-
@@ -153,7 +190,9 @@ reply_error_with_status(Error, Status) :-
 
 error_status(error(couchdb_error(409, _), _), 409) :- !.
 error_status(error(couchdb_error(_, _), _), 502) :- !.
+error_status(error(existence_error(knowledge_document, _), _), 404) :- !.
 error_status(error(permission_error(modify, active_knowledge_release, _), _), 409) :- !.
+error_status(error(permission_error(modify, knowledge_document_identity(_, _), _), _), 409) :- !.
 error_status(error(existence_error(knowledge_base, _), _), 409) :- !.
 error_status(_, 400).
 
