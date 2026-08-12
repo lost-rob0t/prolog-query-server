@@ -22,7 +22,7 @@
 
 index_handler(_Request) :-
     reply_json_dict(_{service:"prolog-query-server",
-                      version:"0.3.0",
+                      version:"0.4.0",
                       storage:"couchdb",
                       engine:"swi-prolog"}).
 
@@ -139,6 +139,7 @@ query_request(Input, ForceTrace, KB, Goal, Options) :-
     optional(Input, refresh, true, Refresh),
     optional(Input, trace, false, RequestedTrace),
     optional(Input, release, null, Release),
+    optional(Input, explanation_mode, "full", ExplanationMode),
     bool(Refresh),
     bool(RequestedTrace),
     (   ForceTrace == true
@@ -149,7 +150,8 @@ query_request(Input, ForceTrace, KB, Goal, Options) :-
                 max_solutions(MaxSolutions),
                 refresh(Refresh),
                 trace(Trace),
-                release(Release)
+                release(Release),
+                explanation_mode(ExplanationMode)
               ].
 
 reload_release(KB, null, Stats) :-
