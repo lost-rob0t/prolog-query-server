@@ -123,7 +123,10 @@ remove_job(QueryId) :-
 query_worker(QueryId, KB, Goal, Options) :-
     thread_self(Thread),
     catch(( mark_running(QueryId, Thread),
-            kb_service:query_kb(KB, Goal, Options, Result),
+            % A cancellation signal may arrive during CouchDB refresh as well as
+            % inference. Keep every dynamic runtime mutation isolated until the
+            % whole query succeeds; an exception rolls the refresh back atomically.
+            transaction(kb_service:query_kb(KB, Goal, Options, Result)),
             metrics:observe_query(Result, Options),
             observe_result_refresh(Result),
             finish_success(QueryId, Result)
