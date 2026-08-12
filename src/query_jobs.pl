@@ -8,7 +8,7 @@
 :- use_module(library(uuid)).
 :- use_module(config).
 :- use_module(kb_service).
-:- use_module(metrics).
+:- use_module(metrics, [observe_query/2, observe_error/1, observe_refresh/1]).
 :- use_module(api_errors).
 
 :- dynamic query_job/7.
@@ -125,7 +125,7 @@ query_worker(QueryId, KB, Goal, Options) :-
     catch(( mark_running(QueryId, Thread),
             kb_service:query_kb(KB, Goal, Options, Result),
             metrics:observe_query(Result, Options),
-            observe_refresh(Result),
+            observe_result_refresh(Result),
             finish_success(QueryId, Result)
           ),
           Error,
@@ -152,7 +152,7 @@ mark_running_state(cancelling, QueryId, _Thread, _CreatedAt) :-
 mark_running_state(State, QueryId, _Thread, _CreatedAt) :-
     throw(error(pqs_query_not_cancellable(QueryId, State), _)).
 
-observe_refresh(Result) :-
+observe_result_refresh(Result) :-
     (   get_dict(refresh, Result, Refresh)
     ->  metrics:observe_refresh(Refresh)
     ;   true
