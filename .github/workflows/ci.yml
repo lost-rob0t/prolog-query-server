@@ -102,7 +102,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Run incremental CouchDB changes synchronization suite
-        run: tests/changes_sync.sh
+        run: bash tests/changes_sync.sh
 
   required:
     name: required
