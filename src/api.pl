@@ -6,6 +6,7 @@
 :- use_module(library(error)).
 :- use_module(couchdb).
 :- use_module(kb_service).
+:- use_module(analysis_service).
 :- use_module(builtins).
 :- use_module(auth).
 
@@ -20,12 +21,13 @@
 :- http_handler(root('v1/document'), knowledge_document_handler, []).
 :- http_handler(root('v1/bulk'), bulk_handler, [method(post)]).
 :- http_handler(root('v1/builtins'), builtins_handler, [method(get)]).
+:- http_handler(root('v1/analyze'), analyze_handler, [method(post)]).
 :- http_handler(root('v1/releases'), releases_handler, [method(get)]).
 :- http_handler(root('v1/releases/activate'), activate_release_handler, [method(post)]).
 
 index_handler(_Request) :-
     reply_json_dict(_{service:"prolog-query-server",
-                      version:"0.6.0",
+                      version:"0.7.0",
                       storage:"couchdb",
                       engine:"swi-prolog"}).
 
@@ -105,6 +107,15 @@ builtins_handler(Request) :-
                        reply_json_dict(Catalog)
                      )).
 
+analyze_handler(Request) :-
+    secured_api_call(Request, read,
+                     ( read_json(Request, Input),
+                       input_kb(Input, KB),
+                       required(Input, release, Release),
+                       analysis_service:analyze_release(KB, Release, Analysis),
+                       reply_json_dict(Analysis)
+                     )).
+
 query_handler(Request) :-
     secured_api_call(Request, read,
                      ( read_json(Request, Input),
@@ -147,7 +158,8 @@ knowledge_handler(Request) :-
 
 releases_handler(Request) :-
     secured_api_call(Request, read,
-                     ( http_parameters(Request, [kb(KBAtom, [default(default)])]),
+                     ( http_parameters(Request,
+                                       [kb(KBAtom, [default(default)])]),
                        atom_string(KBAtom, KB),
                        kb_service:release_status(KB, Status),
                        reply_json_dict(Status)
@@ -156,9 +168,17 @@ releases_handler(Request) :-
 activate_release_handler(Request) :-
     secured_api_call(Request, write,
                      ( read_json(Request, Input),
-                       kb_service:activate_release(Input, Saved),
+                       optional(Input, strict, false, Strict),
+                       bool(Strict),
+                       activate_release(Strict, Input, Saved),
                        reply_json_dict(Saved)
                      )).
+
+activate_release(true, Input, Saved) :-
+    !,
+    analysis_service:activate_release_strict(Input, Saved).
+activate_release(false, Input, Saved) :-
+    kb_service:activate_release(Input, Saved).
 
 secured_api_call(Request, Capability, Goal) :-
     api_call((auth:authorize(Request, Capability), Goal)).
@@ -174,12 +194,23 @@ query_request(Input, ForceTrace, KB, Goal, Options) :-
     optional(Input, explanation_mode, "full", ExplanationMode),
     bool(Refresh),
     bool(RequestedTrace),
-    (   ForceTrace == true -> Trace = true ; Trace = RequestedTrace ),
-    Options = [max_depth(MaxDepth), max_solutions(MaxSolutions), refresh(Refresh),
-               trace(Trace), release(Release), explanation_mode(ExplanationMode)].
+    (   ForceTrace == true
+    ->  Trace = true
+    ;   Trace = RequestedTrace
+    ),
+    Options = [ max_depth(MaxDepth),
+                max_solutions(MaxSolutions),
+                refresh(Refresh),
+                trace(Trace),
+                release(Release),
+                explanation_mode(ExplanationMode)
+              ].
 
-reload_release(KB, null, Stats) :- !, kb_service:refresh_kb(KB, Stats).
-reload_release(KB, Release, Stats) :- kb_service:refresh_kb(KB, Release, Stats).
+reload_release(KB, null, Stats) :-
+    !,
+    kb_service:refresh_kb(KB, Stats).
+reload_release(KB, Release, Stats) :-
+    kb_service:refresh_kb(KB, Release, Stats).
 
 knowledge_for_release(KB, '', Release, Documents) :-
     !,
@@ -200,8 +231,13 @@ read_json(Request, Dict) :-
     http_read_json_dict(Request, Dict),
     must_be(dict, Dict).
 
-api_call(Goal) :- catch(Goal, Error, reply_api_error(Error)).
-reply_api_error(Error) :- error_status(Error, Status), reply_error_with_status(Error, Status).
+api_call(Goal) :-
+    catch(Goal, Error, reply_api_error(Error)).
+
+reply_api_error(Error) :-
+    error_status(Error, Status),
+    reply_error_with_status(Error, Status).
+
 reply_error_with_status(Error, Status) :-
     message_to_string(Error, Message),
     reply_json_dict(_{error:Message}, [status(Status)]).
@@ -209,18 +245,27 @@ reply_error_with_status(Error, Status) :-
 error_status(error(permission_error(access, api_authentication, _), _), 401) :- !.
 error_status(error(permission_error(access, api_capability, _), _), 403) :- !.
 error_status(error(existence_error(environment_variable, _), _), 503) :- !.
+error_status(error(permission_error(activate, invalid_knowledge_release, _), _), 409) :- !.
 error_status(error(couchdb_error(409, _), _), 409) :- !.
 error_status(error(couchdb_error(_, _), _), 502) :- !.
 error_status(error(existence_error(knowledge_document, _), _), 404) :- !.
-error_status(error(permission_error(modify, active_knowledge_release, _), _), 409) :- !.
-error_status(error(permission_error(modify, knowledge_document_identity(_, _), _), _), 409) :- !.
+error_status(error(permission_error(modify, _, _), _), 409) :- !.
 error_status(error(existence_error(knowledge_base, _), _), 409) :- !.
 error_status(_, 400).
 
 required(Dict, Key, Value) :-
-    (get_dict(Key, Dict, Value) -> true ; throw(error(existence_error(key, Key), _))).
+    (   get_dict(Key, Dict, Value)
+    ->  true
+    ;   throw(error(existence_error(key, Key), _))
+    ).
+
 optional(Dict, Key, Default, Value) :-
-    (get_dict(Key, Dict, Value0) -> Value = Value0 ; Value = Default).
+    (   get_dict(Key, Dict, Value0)
+    ->  Value = Value0
+    ;   Value = Default
+    ).
+
 bool(true).
 bool(false).
-bool(Value) :- throw(error(type_error(boolean, Value), _)).
+bool(Value) :-
+    throw(error(type_error(boolean, Value), _)).

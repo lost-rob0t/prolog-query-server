@@ -6,3 +6,4 @@
 - [Structured expert-system proof trees](proof-trees.md)
 - [Safe expert-system builtin registry](builtins.md)
 - [API authentication and authorization](auth.md)
+- [Knowledge-base release static analysis](kb-analysis.md)
