@@ -35,6 +35,9 @@ error_mapping(error(pqs_resource_limit(active_queries, Limit), _),
 error_mapping(error(pqs_resource_limit(request_size, Limit), _),
               413,
               _{error:"payload_too_large", limit:Limit}).
+error_mapping(error(pqs_request_length_required, _),
+              411,
+              _{error:"content_length_required"}).
 error_mapping(error(pqs_resource_limit(document_size, Limit), _),
               413,
               _{error:"knowledge_document_too_large", limit:Limit}).
