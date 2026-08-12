@@ -48,6 +48,7 @@ The resource boundary uses stable JSON errors and never returns a Prolog stack t
 | wall-clock deadline | 504 | `query_timeout` |
 | inference-step budget | 422 | `inference_budget_exhausted` |
 | proof node/byte budget | 422 | `proof_limit_exhausted` |
+| missing bounded JSON body length | 411 | `content_length_required` |
 | raw HTTP request body | 413 | `payload_too_large` |
 | individual knowledge document | 413 | `knowledge_document_too_large` |
 | loaded KB document count | 422 | `kb_document_limit_exceeded` |
@@ -113,9 +114,9 @@ Terminal async results are retained for a bounded TTL so completed/failed/cancel
 
 ## Knowledge and request ceilings
 
-The same hard limits protect full snapshot reloads and incremental changes synchronization. Full snapshots are validated before the existing in-memory runtime is replaced. Incremental upserts maintain per-document serialized byte accounting so changes-sync cannot grow an already loaded KB past its configured document or byte ceiling.
+The same hard limits protect full snapshot reloads and incremental changes synchronization. CouchDB snapshot paging accounts for each retained document while pages are fetched and stops as soon as the configured document-count, document-size, or cumulative byte ceiling would be exceeded; the existing in-memory runtime is not replaced by an oversized snapshot. Incremental upserts maintain per-document serialized-byte accounting so changes-sync cannot grow an already loaded KB past its configured document or byte ceiling.
 
-Every JSON body handled by the API goes through one bounded reader before JSON decoding. The server reads at most `PQS_MAX_REQUEST_BYTES + 1` raw octets, rejects an oversized declared `Content-Length` immediately, and returns `413` before parsing an oversized body. This applies to facts, rules, bulk writes, document PUT/PATCH, query, explain, reload, analysis, cancellation, and release activation requests.
+Every JSON body handled by the API goes through one bounded reader before JSON decoding. The API requires a valid non-negative `Content-Length`; requests without bounded length are rejected with `411`. A declared body larger than `PQS_MAX_REQUEST_BYTES` is rejected with `413` before it is read or parsed. Otherwise the server reads exactly the validated byte count in octet mode and only then decodes UTF-8 JSON. This applies to facts, rules, bulk writes, document PUT/PATCH, query, explain, reload, analysis, cancellation, and release activation requests.
 
 Proof output has independent node and serialized-byte ceilings. This implementation rejects an explanation that would exceed either ceiling; it does not return a silently truncated proof.
 
