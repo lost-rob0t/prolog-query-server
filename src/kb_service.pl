@@ -15,6 +15,8 @@
 :- use_module(couchdb).
 :- use_module(expert_system).
 
+:- dynamic kb_sequence/2.
+
 refresh_kb(KB, Stats) :-
     kb_mutex(KB, Mutex),
     with_mutex(Mutex,
@@ -163,22 +165,126 @@ active_release(KB, Release, Manifest) :-
 ensure_query_snapshot(RuntimeKB, KB, Release, Options, Stats) :-
     option(refresh(Refresh), Options, true),
     (   Refresh == true
-    ->  refresh_release_unlocked(KB, Release, Stats)
+    ->  sync_release_unlocked(RuntimeKB, KB, Release, Stats)
     ;   expert_system:knowledge_base_loaded(RuntimeKB)
-    ->  Stats = _{reloaded:false, release:Release}
+    ->  Stats = _{reloaded:false,
+                  synced:false,
+                  release:Release}
     ;   refresh_release_unlocked(KB, Release, Stats)
     ).
 
+sync_release_unlocked(RuntimeKB, KB, Release, Stats) :-
+    (   expert_system:knowledge_base_loaded(RuntimeKB),
+        kb_sequence(RuntimeKB, Since)
+    ->  catch(sync_from_changes_unlocked(RuntimeKB,
+                                         KB,
+                                         Release,
+                                         Since,
+                                         Stats),
+              error(couchdb_error(_, _), _),
+              refresh_release_unlocked(KB, Release, Stats))
+    ;   refresh_release_unlocked(KB, Release, Stats)
+    ).
+
+sync_from_changes_unlocked(RuntimeKB, KB, Release, Since, Stats) :-
+    couchdb:changes_since(Since, Changes, LastSequence),
+    apply_changes(Changes,
+                  RuntimeKB,
+                  KB,
+                  Release,
+                  0,
+                  0,
+                  0,
+                  Applied,
+                  Removed,
+                  Ignored),
+    set_kb_sequence(RuntimeKB, LastSequence),
+    length(Changes, Seen),
+    Stats = _{reloaded:false,
+              synced:true,
+              sync_mode:"changes",
+              release:Release,
+              since:Since,
+              last_seq:LastSequence,
+              changes_seen:Seen,
+              knowledge_applied:Applied,
+              knowledge_removed:Removed,
+              ignored_changes:Ignored}.
+
+apply_changes([], _RuntimeKB, _KB, _Release,
+              Applied, Removed, Ignored,
+              Applied, Removed, Ignored).
+apply_changes([Change|Rest], RuntimeKB, KB, Release,
+              Applied0, Removed0, Ignored0,
+              Applied, Removed, Ignored) :-
+    apply_change(Change, RuntimeKB, KB, Release, Action),
+    count_action(Action,
+                 Applied0,
+                 Removed0,
+                 Ignored0,
+                 Applied1,
+                 Removed1,
+                 Ignored1),
+    apply_changes(Rest, RuntimeKB, KB, Release,
+                  Applied1, Removed1, Ignored1,
+                  Applied, Removed, Ignored).
+
+apply_change(Change, RuntimeKB, _KB, _Release, removed) :-
+    get_dict(deleted, Change, true),
+    !,
+    required(Change, id, Id),
+    expert_system:remove_document(RuntimeKB, Id).
+apply_change(Change, RuntimeKB, KB, Release, Action) :-
+    (   get_dict(doc, Change, Document),
+        is_dict(Document),
+        document_matches_runtime(Document, KB, Release)
+    ->  expert_system:upsert_document(RuntimeKB, Document, _Outcome),
+        Action = applied
+    ;   required(Change, id, Id),
+        expert_system:remove_document(RuntimeKB, Id),
+        Action = ignored
+    ).
+
+count_action(applied, A0, R, I, A, R, I) :-
+    A is A0 + 1.
+count_action(removed, A, R0, I, A, R, I) :-
+    R is R0 + 1.
+count_action(ignored, A, R, I0, A, R, I) :-
+    I is I0 + 1.
+
+document_matches_runtime(Document, KB, Release) :-
+    get_dict(kb, Document, DocumentKB),
+    DocumentKB == KB,
+    get_dict(type, Document, Type),
+    memberchk(Type, ["prolog_fact", "prolog_rule"]),
+    document_release(Document, DocumentRelease),
+    DocumentRelease == Release.
+
+document_release(Document, Release) :-
+    (   get_dict(release, Document, Release0)
+    ->  Release = Release0
+    ;   Release = "legacy"
+    ).
+
 refresh_release_unlocked(KB, Release, Stats) :-
+    couchdb:database_update_seq(Sequence),
     couchdb:find_kb_documents(KB, Release, Documents),
     runtime_key(KB, Release, RuntimeKB),
     expert_system:replace_kb(RuntimeKB, Documents, LoadStats),
+    set_kb_sequence(RuntimeKB, Sequence),
     length(Documents, DocumentCount),
     put_dict(_{reloaded:true,
+               synced:false,
+               sync_mode:"full",
                release:Release,
+               last_seq:Sequence,
                documents:DocumentCount},
              LoadStats,
              Stats).
+
+set_kb_sequence(RuntimeKB, Sequence) :-
+    retractall(kb_sequence(RuntimeKB, _)),
+    assertz(kb_sequence(RuntimeKB, Sequence)).
 
 runtime_key(KB, Release, kb_release(KB, Release)).
 
