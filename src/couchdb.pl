@@ -3,6 +3,8 @@
             health/1,
             save_document/2,
             put_document/3,
+            delete_document/3,
+            bulk_documents/2,
             get_document/2,
             find_kb_documents/2,
             find_kb_documents/3,
@@ -46,6 +48,28 @@ put_document(Id, Document0, Reply) :-
              json(Document),
              Reply,
              [json_object(dict), status_code(Status)|Options]),
+    require_status(Status, [201, 202], Reply).
+
+delete_document(Id, Revision, Reply) :-
+    ensure_storage,
+    document_url(Id, BaseURL),
+    uri_encoded(query_value, Revision, EncodedRevision),
+    format(atom(URL), '~w?rev=~w', [BaseURL, EncodedRevision]),
+    request_options(Options),
+    http_delete(URL,
+                Reply,
+                [json_object(dict), status_code(Status)|Options]),
+    require_status(Status, [200, 202], Reply).
+
+bulk_documents(Documents, Reply) :-
+    ensure_storage,
+    must_be(list, Documents),
+    database_endpoint('_bulk_docs', URL),
+    request_options(Options),
+    http_post(URL,
+              json(_{docs:Documents}),
+              Reply,
+              [json_object(dict), status_code(Status)|Options]),
     require_status(Status, [201, 202], Reply).
 
 get_document(Id, Document) :-
