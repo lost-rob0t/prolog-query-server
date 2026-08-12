@@ -372,28 +372,23 @@ input_kb(Input, KB) :-
 
 read_json(Request, Dict) :-
     config:max_request_bytes(MaxBytes),
-    enforce_content_length(Request, MaxBytes),
+    request_content_length(Request, MaxBytes, ContentLength),
     required_request_stream(Request, Stream),
-    MaxRead is MaxBytes + 1,
-    read_bounded_octets(Stream, MaxRead, Octets),
-    length(Octets, Bytes),
-    (   Bytes =< MaxBytes
-    ->  true
-    ;   resource_limits:resource_limit(request_size,
-                                        _{max_bytes:MaxBytes,
-                                          actual_bytes:Bytes})
-    ),
+    read_exact_octets(Stream, ContentLength, Octets),
     decode_utf8_json(Octets, Dict),
     must_be(dict, Dict).
 
-enforce_content_length(Request, MaxBytes) :-
-    (   memberchk(content_length(ContentLength), Request),
-        number(ContentLength),
-        ContentLength > MaxBytes
-    ->  resource_limits:resource_limit(request_size,
-                                        _{max_bytes:MaxBytes,
-                                          actual_bytes:ContentLength})
-    ;   true
+request_content_length(Request, MaxBytes, ContentLength) :-
+    (   memberchk(content_length(ContentLength0), Request),
+        integer(ContentLength0),
+        ContentLength0 >= 0
+    ->  (   ContentLength0 =< MaxBytes
+        ->  ContentLength = ContentLength0
+        ;   resource_limits:resource_limit(request_size,
+                                            _{max_bytes:MaxBytes,
+                                              actual_bytes:ContentLength0})
+        )
+    ;   throw(error(pqs_request_length_required, _))
     ).
 
 required_request_stream(Request, Stream) :-
@@ -402,13 +397,18 @@ required_request_stream(Request, Stream) :-
     ;   throw(error(existence_error(http_request_input, input), _))
     ).
 
-read_bounded_octets(Stream, MaxRead, Octets) :-
+read_exact_octets(Stream, ContentLength, Octets) :-
     stream_property(Stream, encoding(Encoding)),
     setup_call_cleanup(set_stream(Stream, encoding(octet)),
-                       ( read_string(Stream, MaxRead, Raw),
+                       ( read_string(Stream, ContentLength, Raw),
                          string_codes(Raw, Octets)
                        ),
-                       set_stream(Stream, encoding(Encoding))).
+                       set_stream(Stream, encoding(Encoding))),
+    length(Octets, ActualLength),
+    (   ActualLength =:= ContentLength
+    ->  true
+    ;   throw(error(syntax_error(incomplete_http_request_body), _))
+    ).
 
 decode_utf8_json(Octets, Dict) :-
     (   phrase(utf8_codes(Codes), Octets)
