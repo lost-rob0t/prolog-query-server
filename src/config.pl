@@ -2,7 +2,10 @@
           [ server_port/1,
             couchdb_base_url/1,
             couchdb_database/1,
-            couchdb_auth_options/1
+            couchdb_auth_options/1,
+            api_auth_mode/1,
+            api_read_token/1,
+            api_write_token/1
           ]).
 
 server_port(Port) :-
@@ -21,6 +24,27 @@ couchdb_auth_options(Options) :-
         Password \== ''
     ->  Options = [authorization(basic(User, Password))]
     ;   Options = []
+    ).
+
+api_auth_mode(Mode) :-
+    env_atom('PQS_AUTH_MODE', required, Raw),
+    downcase_atom(Raw, Mode),
+    (   memberchk(Mode, [required, off])
+    ->  true
+    ;   throw(error(domain_error(api_auth_mode, Raw), _))
+    ).
+
+api_read_token(Token) :-
+    env_required('PQS_READ_TOKEN', Token).
+
+api_write_token(Token) :-
+    env_required('PQS_WRITE_TOKEN', Token).
+
+env_required(Name, Value) :-
+    (   getenv(Name, Value),
+        Value \== ''
+    ->  true
+    ;   throw(error(existence_error(environment_variable, Name), _))
     ).
 
 env_atom(Name, Default, Value) :-
