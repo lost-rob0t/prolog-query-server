@@ -22,6 +22,7 @@
 :- http_handler(root('v1/bulk'), bulk_handler, [method(post)]).
 :- http_handler(root('v1/builtins'), builtins_handler, [method(get)]).
 :- http_handler(root('v1/analyze'), analyze_handler, [method(post)]).
+:- http_handler(root('v1/conflicts'), conflicts_handler, [method(get)]).
 :- http_handler(root('v1/releases'), releases_handler, [method(get)]).
 :- http_handler(root('v1/releases/activate'), activate_release_handler, [method(post)]).
 
@@ -106,6 +107,27 @@ builtins_handler(Request) :-
                      ( builtins:builtin_catalog(Catalog),
                        reply_json_dict(Catalog)
                      )).
+
+conflicts_handler(Request) :-
+    observed_secured_call(Request, conflicts, read, 200,
+                          ( http_parameters(Request,
+                                            [ kb(KBAtom, [default(default)]),
+                                              release(ReleaseAtom, [default('')])
+                                            ]),
+                            atom_string(KBAtom, KB),
+                            conflicts_for_release(KB, ReleaseAtom, Conflicts),
+                            length(Conflicts, Count),
+                            reply_json_dict(_{kb:KB,
+                                              count:Count,
+                                              conflicts:Conflicts})
+                          )).
+
+conflicts_for_release(KB, '', Conflicts) :-
+    !,
+    kb_service:knowledge_conflicts(KB, Conflicts).
+conflicts_for_release(KB, ReleaseAtom, Conflicts) :-
+    atom_string(ReleaseAtom, Release),
+    kb_service:knowledge_conflicts(KB, Release, Conflicts).
 
 analyze_handler(Request) :-
     secured_api_call(Request, read,
@@ -249,6 +271,7 @@ error_status(error(permission_error(activate, invalid_knowledge_release, _), _),
 error_status(error(couchdb_error(409, _), _), 409) :- !.
 error_status(error(couchdb_error(_, _), _), 502) :- !.
 error_status(error(existence_error(knowledge_document, _), _), 404) :- !.
+error_status(error(permission_error(load, conflicted_knowledge_document, _), _), 409) :- !.
 error_status(error(permission_error(modify, _, _), _), 409) :- !.
 error_status(error(existence_error(knowledge_base, _), _), 409) :- !.
 error_status(_, 400).

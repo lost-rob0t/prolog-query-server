@@ -74,7 +74,8 @@ bulk_documents(Documents, Reply) :-
 
 get_document(Id, Document) :-
     ensure_storage,
-    document_url(Id, URL),
+    document_url(Id, BaseURL),
+    format(atom(URL), '~w?conflicts=true', [BaseURL]),
     request_options(Options),
     http_get(URL,
              Reply,
@@ -144,7 +145,7 @@ changes_page(Since, Limit, Changes, LastSequence, Pending) :-
     uri_encoded(query_value, SinceText, EncodedSince),
     database_endpoint('_changes', BaseURL),
     format(atom(URL),
-           '~w?since=~w&include_docs=true&style=main_only&limit=~d',
+           '~w?since=~w&include_docs=true&conflicts=true&style=main_only&limit=~d',
            [BaseURL, EncodedSince, Limit]),
     request_options(Options),
     http_get(URL,
@@ -195,7 +196,7 @@ find_page(KB, Limit, Bookmark, Documents, NextBookmark) :-
     database_endpoint('_find', URL),
     Selector = _{kb:KB,
                  type:_{'$in':["prolog_fact", "prolog_rule"]}},
-    Base = _{selector:Selector, limit:Limit},
+    Base = _{selector:Selector, limit:Limit, conflicts:true},
     (   Bookmark == null
     ->  Query = Base
     ;   put_dict(bookmark, Base, Bookmark, Query)
