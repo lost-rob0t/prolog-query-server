@@ -1,0 +1,29 @@
+name: apply-conflict-hardening
+
+on:
+  push:
+    branches: [feature/issue-22-fail-closed-conflicts]
+    paths: [.github/workflows/apply-conflict-hardening.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/issue-22-fail-closed-conflicts
+          fetch-depth: 0
+      - name: Apply guarded source transformations
+        run: python3 scripts/apply_conflict_hardening.py
+      - name: Remove one-shot patch machinery
+        run: git rm scripts/apply_conflict_hardening.py .github/workflows/apply-conflict-hardening.yml
+      - name: Commit conflict hardening
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/couchdb.pl src/kb_service.pl src/api.pl
+          git commit -m 'Fail closed on conflicted CouchDB knowledge'
+          git push origin HEAD:feature/issue-22-fail-closed-conflicts
