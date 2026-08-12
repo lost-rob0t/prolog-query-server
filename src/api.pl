@@ -3,7 +3,10 @@
 :- use_module(library(http/http_dispatch)).
 :- use_module(library(http/http_json)).
 :- use_module(library(http/http_parameters)).
+:- use_module(library(http/json)).
 :- use_module(library(error)).
+:- use_module(library(uuid)).
+:- use_module(library(utf8)).
 :- use_module(couchdb).
 :- use_module(kb_service).
 :- use_module(analysis_service).
@@ -11,6 +14,10 @@
 :- use_module(auth).
 :- use_module(metrics).
 :- use_module(observability).
+:- use_module(config).
+:- use_module(resource_limits).
+:- use_module(query_jobs).
+:- use_module(api_errors).
 
 :- http_handler(root(.), index_handler, [method(get)]).
 :- http_handler(root(health), health_handler, [method(get)]).
@@ -18,6 +25,8 @@
 :- http_handler(root('v1/facts'), facts_handler, [method(post)]).
 :- http_handler(root('v1/rules'), rules_handler, [method(post)]).
 :- http_handler(root('v1/query'), query_handler, [method(post)]).
+:- http_handler(root('v1/query/status'), query_status_handler, [method(get)]).
+:- http_handler(root('v1/query/cancel'), query_cancel_handler, [method(post)]).
 :- http_handler(root('v1/explain'), explain_handler, [method(post)]).
 :- http_handler(root('v1/reload'), reload_handler, [method(post)]).
 :- http_handler(root('v1/knowledge'), knowledge_handler, [method(get)]).
@@ -31,7 +40,7 @@
 
 index_handler(_Request) :-
     reply_json_dict(_{service:"prolog-query-server",
-                      version:"0.7.0",
+                      version:"0.8.0",
                       storage:"couchdb",
                       engine:"swi-prolog"}).
 
@@ -41,8 +50,8 @@ health_handler(_Request) :-
             health_status(Auth, Status),
             reply_json_dict(_{status:Status, couchdb:CouchDB, auth:Auth})
           ),
-          Error,
-          reply_error_with_status(Error, 503)).
+          _Error,
+          reply_json_dict(_{error:"service_unavailable"}, [status(503)])).
 
 health_status(Auth, "ok") :-
     get_dict(configured, Auth, true),
@@ -157,20 +166,48 @@ analyze_handler(Request) :-
 query_handler(Request) :-
     secured_api_call(Request, read,
                      ( read_json(Request, Input),
-                       query_request(Input, false, KB, Goal, Options),
-                       kb_service:query_kb(KB, Goal, Options, Result),
-                       observe_query_result(Result, Options),
-                       reply_json_dict(Result)
+                       query_request(Input, false, KB, Goal, Options, Async),
+                       execute_query_request(Async, KB, Goal, Options)
                      )).
 
 explain_handler(Request) :-
     secured_api_call(Request, read,
                      ( read_json(Request, Input),
-                       query_request(Input, true, KB, Goal, Options),
-                       kb_service:query_kb(KB, Goal, Options, Result),
-                       observe_query_result(Result, Options),
-                       reply_json_dict(Result)
+                       query_request(Input, true, KB, Goal, Options, Async),
+                       execute_query_request(Async, KB, Goal, Options)
                      )).
+
+execute_query_request(true, KB, Goal, Options) :-
+    !,
+    query_jobs:submit_query(KB, Goal, Options, Ack),
+    reply_json_dict(Ack, [status(202)]).
+execute_query_request(false, KB, Goal, Options0) :-
+    new_query_id(QueryId),
+    Options = [query_id(QueryId)|Options0],
+    kb_service:query_kb(KB, Goal, Options, Result),
+    observe_query_result(Result, Options),
+    reply_json_dict(Result).
+
+query_status_handler(Request) :-
+    secured_api_call(Request, read,
+                     ( http_parameters(Request, [id(IdAtom, [])]),
+                       atom_string(IdAtom, QueryId),
+                       query_jobs:query_status(QueryId, Status),
+                       reply_json_dict(Status)
+                     )).
+
+query_cancel_handler(Request) :-
+    secured_api_call(Request, read,
+                     ( read_json(Request, Input),
+                       required(Input, query_id, QueryId),
+                       must_be(string, QueryId),
+                       query_jobs:cancel_query(QueryId, Reply),
+                       reply_json_dict(Reply, [status(202)])
+                     )).
+
+new_query_id(QueryId) :-
+    uuid(UUID, [version(4)]),
+    atom_string(UUID, QueryId).
 
 observe_query_result(Result, Options) :-
     metrics:observe_query(Result, Options),
@@ -264,6 +301,8 @@ endpoint_path('/metrics', metrics) :- !.
 endpoint_path('/v1/facts', facts) :- !.
 endpoint_path('/v1/rules', rules) :- !.
 endpoint_path('/v1/query', query) :- !.
+endpoint_path('/v1/query/status', query_status) :- !.
+endpoint_path('/v1/query/cancel', query_cancel) :- !.
 endpoint_path('/v1/explain', explain) :- !.
 endpoint_path('/v1/reload', reload) :- !.
 endpoint_path('/v1/knowledge', knowledge) :- !.
@@ -276,23 +315,34 @@ endpoint_path('/v1/releases', releases) :- !.
 endpoint_path('/v1/releases/activate', release_activate) :- !.
 endpoint_path(_, other).
 
-query_request(Input, ForceTrace, KB, Goal, Options) :-
+query_request(Input, ForceTrace, KB, Goal, Options, Async) :-
     input_kb(Input, KB),
     required(Input, goal, Goal),
-    optional(Input, max_depth, 32, MaxDepth),
-    optional(Input, max_solutions, 100, MaxSolutions),
+    resource_limits:effective_query_budget(Input, Budget),
+    get_dict(timeout_ms, Budget, TimeoutMs),
+    get_dict(max_depth, Budget, MaxDepth),
+    get_dict(max_solutions, Budget, MaxSolutions),
+    get_dict(max_inference_steps, Budget, MaxInferenceSteps),
+    get_dict(max_proof_nodes, Budget, MaxProofNodes),
+    get_dict(max_proof_bytes, Budget, MaxProofBytes),
     optional(Input, refresh, true, Refresh),
     optional(Input, trace, false, RequestedTrace),
     optional(Input, release, null, Release),
     optional(Input, explanation_mode, "full", ExplanationMode),
+    optional(Input, async, false, Async),
     bool(Refresh),
     bool(RequestedTrace),
+    bool(Async),
     (   ForceTrace == true
     ->  Trace = true
     ;   Trace = RequestedTrace
     ),
     Options = [ max_depth(MaxDepth),
                 max_solutions(MaxSolutions),
+                timeout_ms(TimeoutMs),
+                max_inference_steps(MaxInferenceSteps),
+                max_proof_nodes(MaxProofNodes),
+                max_proof_bytes(MaxProofBytes),
                 refresh(Refresh),
                 trace(Trace),
                 release(Release),
@@ -321,28 +371,55 @@ input_kb(Input, KB) :-
     Length > 0.
 
 read_json(Request, Dict) :-
-    http_read_json_dict(Request, Dict),
+    config:max_request_bytes(MaxBytes),
+    enforce_content_length(Request, MaxBytes),
+    required_request_stream(Request, Stream),
+    MaxRead is MaxBytes + 1,
+    read_bounded_octets(Stream, MaxRead, Octets),
+    length(Octets, Bytes),
+    (   Bytes =< MaxBytes
+    ->  true
+    ;   resource_limits:resource_limit(request_size,
+                                        _{max_bytes:MaxBytes,
+                                          actual_bytes:Bytes})
+    ),
+    decode_utf8_json(Octets, Dict),
     must_be(dict, Dict).
 
+enforce_content_length(Request, MaxBytes) :-
+    (   memberchk(content_length(ContentLength), Request),
+        number(ContentLength),
+        ContentLength > MaxBytes
+    ->  resource_limits:resource_limit(request_size,
+                                        _{max_bytes:MaxBytes,
+                                          actual_bytes:ContentLength})
+    ;   true
+    ).
+
+required_request_stream(Request, Stream) :-
+    (   memberchk(input(Stream), Request)
+    ->  true
+    ;   throw(error(existence_error(http_request_input, input), _))
+    ).
+
+read_bounded_octets(Stream, MaxRead, Octets) :-
+    stream_property(Stream, encoding(Encoding)),
+    setup_call_cleanup(set_stream(Stream, encoding(octet)),
+                       ( read_string(Stream, MaxRead, Raw),
+                         string_codes(Raw, Octets)
+                       ),
+                       set_stream(Stream, encoding(Encoding))).
+
+decode_utf8_json(Octets, Dict) :-
+    (   phrase(utf8_codes(Codes), Octets)
+    ->  atom_codes(JSON, Codes),
+        atom_json_dict(JSON, Dict, [])
+    ;   throw(error(domain_error(utf8_json_body, invalid), _))
+    ).
+
 reply_api_error(Error) :-
-    error_status(Error, Status),
-    reply_error_with_status(Error, Status).
-
-reply_error_with_status(Error, Status) :-
-    message_to_string(Error, Message),
-    reply_json_dict(_{error:Message}, [status(Status)]).
-
-error_status(error(permission_error(access, api_authentication, _), _), 401) :- !.
-error_status(error(permission_error(access, api_capability, _), _), 403) :- !.
-error_status(error(existence_error(environment_variable, _), _), 503) :- !.
-error_status(error(permission_error(activate, invalid_knowledge_release, _), _), 409) :- !.
-error_status(error(couchdb_error(409, _), _), 409) :- !.
-error_status(error(couchdb_error(_, _), _), 502) :- !.
-error_status(error(existence_error(knowledge_document, _), _), 404) :- !.
-error_status(error(permission_error(load, conflicted_knowledge_document, _), _), 409) :- !.
-error_status(error(permission_error(modify, _, _), _), 409) :- !.
-error_status(error(existence_error(knowledge_base, _), _), 409) :- !.
-error_status(_, 400).
+    api_errors:error_response(Error, Status, Payload),
+    reply_json_dict(Payload, [status(Status)]).
 
 required(Dict, Key, Value) :-
     (   get_dict(Key, Dict, Value)
