@@ -7,7 +7,9 @@
             find_kb_documents/2,
             find_kb_documents/3,
             get_kb_manifest/2,
-            put_kb_manifest/4
+            put_kb_manifest/4,
+            database_update_seq/1,
+            changes_since/3
           ]).
 
 :- use_module(library(http/http_client)).
@@ -83,6 +85,65 @@ put_kb_manifest(KB, Release, ExpectedRev, Reply) :-
     ;   put_dict('_rev', Base, ExpectedRev, Document)
     ),
     put_document(Id, Document, Reply).
+
+database_update_seq(Sequence) :-
+    ensure_storage,
+    database_url(URL),
+    request_options(Options),
+    http_get(URL,
+             Reply,
+             [json_object(dict), status_code(Status)|Options]),
+    require_status(Status, [200], Reply),
+    get_dict(update_seq, Reply, Sequence).
+
+changes_since(Since, Changes, LastSequence) :-
+    ensure_storage,
+    changes_pages(Since, 500, [], Reversed, LastSequence),
+    reverse(Reversed, Changes).
+
+changes_pages(Since, Limit, Acc0, Acc, LastSequence) :-
+    changes_page(Since, Limit, Page, NextSequence, Pending),
+    reverse(Page, ReversedPage),
+    append(ReversedPage, Acc0, Acc1),
+    length(Page, Count),
+    (   Pending =:= 0
+    ->  Acc = Acc1,
+        LastSequence = NextSequence
+    ;   Count =:= 0
+    ->  Acc = Acc1,
+        LastSequence = NextSequence
+    ;   changes_pages(NextSequence, Limit, Acc1, Acc, LastSequence)
+    ).
+
+changes_page(Since, Limit, Changes, LastSequence, Pending) :-
+    sequence_text(Since, SinceText),
+    uri_encoded(query_value, SinceText, EncodedSince),
+    database_endpoint('_changes', BaseURL),
+    format(atom(URL),
+           '~w?since=~w&include_docs=true&style=main_only&limit=~d',
+           [BaseURL, EncodedSince, Limit]),
+    request_options(Options),
+    http_get(URL,
+             Reply,
+             [json_object(dict), status_code(Status)|Options]),
+    require_status(Status, [200], Reply),
+    get_dict(results, Reply, Changes),
+    get_dict(last_seq, Reply, LastSequence),
+    (   get_dict(pending, Reply, Pending0)
+    ->  Pending = Pending0
+    ;   length(Changes, Count),
+        ( Count < Limit -> Pending = 0 ; Pending = 1 )
+    ).
+
+sequence_text(Value, Text) :-
+    (   string(Value)
+    ->  Text = Value
+    ;   atom(Value)
+    ->  atom_string(Value, Text)
+    ;   number(Value)
+    ->  number_string(Value, Text)
+    ;   term_string(Value, Text)
+    ).
 
 document_in_release(Release, Document) :-
     document_release(Document, DocumentRelease),
