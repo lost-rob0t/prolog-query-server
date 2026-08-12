@@ -1,0 +1,42 @@
+name: conflict-policy
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: conflict-policy-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  conflict-policy-e2e:
+    name: couchdb-conflict-policy-e2e
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Load conflict-aware modules with syntax errors fatal
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y swi-prolog-nox
+          swipl -q --on-error=status -g "load_files(['src/couchdb.pl','src/kb_service.pl','src/api.pl'],[silent(true)]),halt."
+      - name: Shellcheck conflict policy harness
+        run: shellcheck tests/conflict_policy.sh
+      - name: Run fail-closed conflict policy suite
+        run: bash tests/conflict_policy.sh
+
+  conflict-policy-required:
+    name: conflict-policy-required
+    if: always()
+    needs: [conflict-policy-e2e]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require conflict policy suite
+        env:
+          RESULT: ${{ needs.conflict-policy-e2e.result }}
+        run: test "$RESULT" = success

@@ -10,13 +10,13 @@ wait_http(){ local u="$1"; shift; for _ in $(seq 1 120); do curl -fsS "$@" "$u" 
 replicate_a_to_b(){
   curl -fsS -u admin:admin -X POST http://127.0.0.1:5984/_replicate \
     -H 'content-type: application/json' \
-    -d '{"source":"prolog_kb","target":"http://admin:admin@couchdb-b:5984/prolog_kb","create_target":true}'
+    -d '{"source":"http://admin:admin@couchdb-a:5984/prolog_kb","target":"http://admin:admin@couchdb-b:5984/prolog_kb","create_target":true}'
 }
 
 replicate_b_to_a(){
   curl -fsS -u admin:admin -X POST http://127.0.0.1:5985/_replicate \
     -H 'content-type: application/json' \
-    -d '{"source":"prolog_kb","target":"http://admin:admin@couchdb-a:5984/prolog_kb","create_target":true}'
+    -d '{"source":"http://admin:admin@couchdb-b:5984/prolog_kb","target":"http://admin:admin@couchdb-a:5984/prolog_kb","create_target":true}'
 }
 
 "${compose[@]}" up -d --build
@@ -126,17 +126,27 @@ losing_rev=$(python3 -c 'import json; print(json.load(open("/tmp/conflict-doc.js
 loser=$(curl -fsS -u admin:admin "http://127.0.0.1:5985/prolog_kb/replicated-conflict-fact?rev=$losing_rev")
 printf '%s' "$loser" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["args"][0] in {"from-a","from-b"}'
 
-# The current API follows CouchDB's deterministic winning revision; the test separately
-# proves the losing revision remains explicitly detectable at the CouchDB layer.
-b_conflict_query=$(curl -fsS http://127.0.0.1:8081/v1/query \
+# CouchDB still has a deterministic storage winner, but inference must fail closed
+# while any relevant unresolved conflict remains.
+b_conflict_code=$(curl -sS -o /tmp/b-conflict-query.json -w '%{http_code}' \
+  http://127.0.0.1:8081/v1/query \
   -H 'content-type: application/json' \
   -d '{"kb":"conflict","goal":{"predicate":"status","args":[{"var":"X"}]}}')
-printf '%s' "$b_conflict_query" | python3 -c 'import json,sys; expected=sys.argv[1]; d=json.load(sys.stdin); assert d["count"]==1; assert d["solutions"][0]["bindings"]["X"]==expected' "$winner"
+[[ "$b_conflict_code" == 409 ]]
+
+inventory=$(curl -fsS 'http://127.0.0.1:8081/v1/conflicts?kb=conflict')
+printf '%s' "$inventory" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["count"]>=1; c=next(x for x in d["conflicts"] if x["id"]=="replicated-conflict-fact"); assert len(c["conflicts"])>=1; assert "args" not in c and "predicate" not in c'
 
 # Replicate the conflicted revision tree back and verify both CouchDB nodes converge
-# on the same winner while retaining conflict metadata.
+# on the same winner while retaining conflict metadata. Storage convergence must not
+# silently change the fail-closed inference policy.
 replicate_b_to_a >/dev/null
 a_conflict_doc=$(curl -fsS -u admin:admin 'http://127.0.0.1:5984/prolog_kb/replicated-conflict-fact?conflicts=true')
 printf '%s' "$a_conflict_doc" | python3 -c 'import json,sys; expected=sys.argv[1]; d=json.load(sys.stdin); assert d["args"][0]==expected; assert len(d.get("_conflicts",[]))>=1' "$winner"
+a_conflict_code=$(curl -sS -o /tmp/a-conflict-query.json -w '%{http_code}' \
+  http://127.0.0.1:8080/v1/query \
+  -H 'content-type: application/json' \
+  -d '{"kb":"conflict","goal":{"predicate":"status","args":[{"var":"X"}]}}')
+[[ "$a_conflict_code" == 409 ]]
 
-echo "CouchDB replication, failover, failback, and conflict suite passed"
+echo "CouchDB replication, failover, failback, and fail-closed conflict suite passed"

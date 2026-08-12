@@ -4,6 +4,8 @@
             query_kb/4,
             knowledge_documents/2,
             knowledge_documents/3,
+            knowledge_conflicts/2,
+            knowledge_conflicts/3,
             knowledge_document/2,
             save_fact/2,
             save_rule/2,
@@ -61,6 +63,57 @@ knowledge_documents(KB, Documents) :-
 knowledge_documents(KB, Release0, Documents) :-
     normalize_release_value(Release0, Release),
     couchdb:find_kb_documents(KB, Release, Documents).
+
+knowledge_conflicts(KB, Conflicts) :-
+    couchdb:find_kb_documents(KB, Documents),
+    conflict_inventory(KB, Documents, Conflicts).
+
+knowledge_conflicts(KB, Release0, Conflicts) :-
+    normalize_release_value(Release0, Release),
+    couchdb:find_kb_documents(KB, Release, Documents),
+    conflict_inventory(KB, Documents, Conflicts).
+
+conflict_inventory(KB, Documents, Conflicts) :-
+    findall(Conflict,
+            ( member(Document, Documents),
+              knowledge_conflict_metadata(Document, Conflict)
+            ),
+            DocumentConflicts),
+    couchdb:get_kb_manifest(KB, Manifest),
+    (   Manifest == none
+    ->  ManifestConflicts = []
+    ;   manifest_conflict_metadata(Manifest, ManifestConflicts)
+    ),
+    append(ManifestConflicts, DocumentConflicts, Conflicts).
+
+knowledge_conflict_metadata(Document, Conflict) :-
+    conflict_revisions(Document, Revisions),
+    required(Document, '_id', Id),
+    required(Document, '_rev', WinningRevision),
+    required(Document, type, Type),
+    knowledge_kind(Type, Kind),
+    document_release(Document, Release),
+    Conflict = _{id:Id,
+                 kind:Kind,
+                 release:Release,
+                 winning_rev:WinningRevision,
+                 conflicts:Revisions}.
+
+manifest_conflict_metadata(Manifest, [Conflict]) :-
+    conflict_revisions(Manifest, Revisions),
+    !,
+    required(Manifest, '_id', Id),
+    required(Manifest, '_rev', WinningRevision),
+    optional(Manifest, active_release, null, ActiveRelease),
+    Conflict = _{id:Id,
+                 kind:"manifest",
+                 release:ActiveRelease,
+                 winning_rev:WinningRevision,
+                 conflicts:Revisions}.
+manifest_conflict_metadata(_Manifest, []).
+
+knowledge_kind("prolog_fact", "fact").
+knowledge_kind("prolog_rule", "rule").
 
 knowledge_document(Id0, Document) :-
     normalize_document_id(Id0, Id),
@@ -312,7 +365,8 @@ active_release(KB, Release, Manifest) :-
     (   Manifest0 == none
     ->  Release = "legacy",
         Manifest = none
-    ;   required(Manifest0, active_release, Release0),
+    ;   ensure_document_conflict_free(Manifest0),
+        required(Manifest0, active_release, Release0),
         normalize_release_value(Release0, Release),
         Manifest = Manifest0
     ).
@@ -396,7 +450,8 @@ apply_change(Change, RuntimeKB, KB, Release, Action) :-
     (   get_dict(doc, Change, Document),
         is_dict(Document),
         document_matches_runtime(Document, KB, Release)
-    ->  expert_system:upsert_document(RuntimeKB, Document, _Outcome),
+    ->  ensure_document_conflict_free(Document),
+        expert_system:upsert_document(RuntimeKB, Document, _Outcome),
         Action = applied
     ;   required(Change, id, Id),
         expert_system:remove_document(RuntimeKB, Id),
@@ -418,6 +473,24 @@ document_matches_runtime(Document, KB, Release) :-
     document_release(Document, DocumentRelease),
     DocumentRelease == Release.
 
+ensure_documents_conflict_free(Documents) :-
+    maplist(ensure_document_conflict_free, Documents).
+
+ensure_document_conflict_free(Document) :-
+    (   conflict_revisions(Document, Revisions)
+    ->  required(Document, '_id', Id),
+        throw(error(permission_error(load,
+                                     conflicted_knowledge_document,
+                                     _{id:Id, conflicts:Revisions}),
+                    _))
+    ;   true
+    ).
+
+conflict_revisions(Document, Revisions) :-
+    get_dict('_conflicts', Document, Revisions),
+    is_list(Revisions),
+    Revisions \== [].
+
 document_release(Document, Release) :-
     (   get_dict(release, Document, Release0)
     ->  normalize_release_value(Release0, Release)
@@ -427,6 +500,7 @@ document_release(Document, Release) :-
 refresh_release_unlocked(KB, Release, Stats) :-
     couchdb:database_update_seq(Sequence),
     couchdb:find_kb_documents(KB, Release, Documents),
+    ensure_documents_conflict_free(Documents),
     runtime_key(KB, Release, RuntimeKB),
     expert_system:replace_kb(RuntimeKB, Documents, LoadStats),
     set_kb_sequence(RuntimeKB, Sequence),
