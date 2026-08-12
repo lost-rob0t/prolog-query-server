@@ -201,21 +201,13 @@ query_solution(KB, Goal, Vars, MaxDepth, TraceEnabled, ExplanationMode, Solution
     ;   Solution = _{bindings:Bindings}
     ).
 
-solve_goal(_KB,
-           goal(eq, [Left, Right]) = Goal,
-           _Depth,
-           _MaxDepth,
-           [],
-           Proof) :-
+solve_goal(_KB, Goal, _Depth, _MaxDepth, [], Proof) :-
+    Goal = goal(eq, [Left, Right]),
     !,
     Left = Right,
     builtin_proof(eq, Goal, Proof).
-solve_goal(_KB,
-           goal(neq, [Left, Right]) = Goal,
-           _Depth,
-           _MaxDepth,
-           [],
-           Proof) :-
+solve_goal(_KB, Goal, _Depth, _MaxDepth, [], Proof) :-
+    Goal = goal(neq, [Left, Right]),
     !,
     dif(Left, Right),
     builtin_proof(neq, Goal, Proof).
