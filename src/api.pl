@@ -9,9 +9,12 @@
 :- use_module(analysis_service).
 :- use_module(builtins).
 :- use_module(auth).
+:- use_module(metrics).
+:- use_module(observability).
 
 :- http_handler(root(.), index_handler, [method(get)]).
 :- http_handler(root(health), health_handler, [method(get)]).
+:- http_handler(root(metrics), metrics_handler, [method(get)]).
 :- http_handler(root('v1/facts'), facts_handler, [method(post)]).
 :- http_handler(root('v1/rules'), rules_handler, [method(post)]).
 :- http_handler(root('v1/query'), query_handler, [method(post)]).
@@ -46,10 +49,18 @@ health_status(Auth, "ok") :-
     !.
 health_status(_Auth, "degraded").
 
+metrics_handler(Request) :-
+    secured_api_call(Request, read,
+                     ( metrics:prometheus_text(Text),
+                       format('Content-type: text/plain; version=0.0.4; charset=UTF-8~n~n~w',
+                              [Text])
+                     )).
+
 facts_handler(Request) :-
     secured_api_call(Request, write,
                      ( read_json(Request, Input),
                        kb_service:save_fact(Input, Saved),
+                       metrics:increment_knowledge_write(fact_create),
                        reply_json_dict(Saved, [status(201)])
                      )).
 
@@ -57,6 +68,7 @@ rules_handler(Request) :-
     secured_api_call(Request, write,
                      ( read_json(Request, Input),
                        kb_service:save_rule(Input, Saved),
+                       metrics:increment_knowledge_write(rule_create),
                        reply_json_dict(Saved, [status(201)])
                      )).
 
@@ -80,10 +92,12 @@ knowledge_document_method(get, Request) :-
 knowledge_document_method(put, Request) :-
     read_json(Request, Input),
     kb_service:put_knowledge_document(Input, Saved),
+    metrics:increment_knowledge_write(document_put),
     reply_json_dict(Saved).
 knowledge_document_method(patch, Request) :-
     read_json(Request, Input),
     kb_service:patch_knowledge_document(Input, Saved),
+    metrics:increment_knowledge_write(document_patch),
     reply_json_dict(Saved).
 knowledge_document_method(delete, Request) :-
     http_parameters(Request,
@@ -93,12 +107,14 @@ knowledge_document_method(delete, Request) :-
     atom_string(IdAtom, Id),
     atom_string(RevisionAtom, Revision),
     kb_service:delete_knowledge_document(Id, Revision, Saved),
+    metrics:increment_knowledge_write(document_delete),
     reply_json_dict(Saved).
 
 bulk_handler(Request) :-
     secured_api_call(Request, write,
                      ( read_json(Request, Input),
                        kb_service:bulk_knowledge_documents(Input, Saved),
+                       metrics:increment_knowledge_write(bulk),
                        reply_json_dict(Saved)
                      )).
 
@@ -109,18 +125,18 @@ builtins_handler(Request) :-
                      )).
 
 conflicts_handler(Request) :-
-    observed_secured_call(Request, conflicts, read, 200,
-                          ( http_parameters(Request,
-                                            [ kb(KBAtom, [default(default)]),
-                                              release(ReleaseAtom, [default('')])
-                                            ]),
-                            atom_string(KBAtom, KB),
-                            conflicts_for_release(KB, ReleaseAtom, Conflicts),
-                            length(Conflicts, Count),
-                            reply_json_dict(_{kb:KB,
-                                              count:Count,
-                                              conflicts:Conflicts})
-                          )).
+    secured_api_call(Request, read,
+                     ( http_parameters(Request,
+                                       [ kb(KBAtom, [default(default)]),
+                                         release(ReleaseAtom, [default('')])
+                                       ]),
+                       atom_string(KBAtom, KB),
+                       conflicts_for_release(KB, ReleaseAtom, Conflicts),
+                       length(Conflicts, Count),
+                       reply_json_dict(_{kb:KB,
+                                         count:Count,
+                                         conflicts:Conflicts})
+                     )).
 
 conflicts_for_release(KB, '', Conflicts) :-
     !,
@@ -143,6 +159,7 @@ query_handler(Request) :-
                      ( read_json(Request, Input),
                        query_request(Input, false, KB, Goal, Options),
                        kb_service:query_kb(KB, Goal, Options, Result),
+                       observe_query_result(Result, Options),
                        reply_json_dict(Result)
                      )).
 
@@ -151,8 +168,16 @@ explain_handler(Request) :-
                      ( read_json(Request, Input),
                        query_request(Input, true, KB, Goal, Options),
                        kb_service:query_kb(KB, Goal, Options, Result),
+                       observe_query_result(Result, Options),
                        reply_json_dict(Result)
                      )).
+
+observe_query_result(Result, Options) :-
+    metrics:observe_query(Result, Options),
+    (   get_dict(refresh, Result, Refresh)
+    ->  metrics:observe_refresh(Refresh)
+    ;   true
+    ).
 
 reload_handler(Request) :-
     secured_api_call(Request, read,
@@ -160,6 +185,7 @@ reload_handler(Request) :-
                        input_kb(Input, KB),
                        optional(Input, release, null, Release),
                        reload_release(KB, Release, Stats),
+                       metrics:observe_refresh(Stats),
                        reply_json_dict(_{kb:KB, refresh:Stats})
                      )).
 
@@ -193,6 +219,7 @@ activate_release_handler(Request) :-
                        optional(Input, strict, false, Strict),
                        bool(Strict),
                        activate_release(Strict, Input, Saved),
+                       metrics:increment_knowledge_write(release_activate),
                        reply_json_dict(Saved)
                      )).
 
@@ -203,7 +230,51 @@ activate_release(false, Input, Saved) :-
     kb_service:activate_release(Input, Saved).
 
 secured_api_call(Request, Capability, Goal) :-
-    api_call((auth:authorize(Request, Capability), Goal)).
+    request_endpoint(Request, Endpoint),
+    observability:new_request_id(RequestId),
+    get_time(Start),
+    catch(( auth:authorize(Request, Capability),
+            (   call(Goal)
+            ->  Outcome = success
+            ;   throw(error(api_handler_failed(Endpoint), _))
+            )
+          ),
+          Error,
+          Outcome = error(Error)),
+    get_time(End),
+    Duration is max(0.0, End - Start),
+    complete_api_call(Outcome, RequestId, Endpoint, Capability, Duration).
+
+complete_api_call(success, RequestId, Endpoint, Capability, Duration) :-
+    metrics:observe_http(Endpoint, success, Duration),
+    observability:log_request(RequestId, Endpoint, Capability, success, Duration).
+complete_api_call(error(Error), RequestId, Endpoint, Capability, Duration) :-
+    metrics:observe_http(Endpoint, error, Duration),
+    metrics:observe_error(Error),
+    observability:log_request(RequestId, Endpoint, Capability, error, Duration),
+    reply_api_error(Error).
+
+request_endpoint(Request, Endpoint) :-
+    (   memberchk(path(Path), Request)
+    ->  endpoint_path(Path, Endpoint)
+    ;   Endpoint = other
+    ).
+
+endpoint_path('/metrics', metrics) :- !.
+endpoint_path('/v1/facts', facts) :- !.
+endpoint_path('/v1/rules', rules) :- !.
+endpoint_path('/v1/query', query) :- !.
+endpoint_path('/v1/explain', explain) :- !.
+endpoint_path('/v1/reload', reload) :- !.
+endpoint_path('/v1/knowledge', knowledge) :- !.
+endpoint_path('/v1/document', document) :- !.
+endpoint_path('/v1/bulk', bulk) :- !.
+endpoint_path('/v1/builtins', builtins) :- !.
+endpoint_path('/v1/analyze', analyze) :- !.
+endpoint_path('/v1/conflicts', conflicts) :- !.
+endpoint_path('/v1/releases', releases) :- !.
+endpoint_path('/v1/releases/activate', release_activate) :- !.
+endpoint_path(_, other).
 
 query_request(Input, ForceTrace, KB, Goal, Options) :-
     input_kb(Input, KB),
@@ -252,9 +323,6 @@ input_kb(Input, KB) :-
 read_json(Request, Dict) :-
     http_read_json_dict(Request, Dict),
     must_be(dict, Dict).
-
-api_call(Goal) :-
-    catch(Goal, Error, reply_api_error(Error)).
 
 reply_api_error(Error) :-
     error_status(Error, Status),
