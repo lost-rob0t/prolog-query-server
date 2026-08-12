@@ -75,6 +75,12 @@ test(reduce_sum_count_min_max,
     handle_command(["reduce", ["sum.", "count.", "min.", "max."], Rows], Reply),
     assertion(Reply == [true, [33, 3, 3, 20]]).
 
+test(couchdb_35_reduce_context_argument,
+     [setup(reset_state)]) :-
+    Rows = [ [["a", "1-a"], 10], [["b", "1-b"], 20] ],
+    handle_command(["reduce", ["count."], Rows, "view-context"], Reply),
+    assertion(Reply == [true, [2]]).
+
 test(reduce_stats,
      [setup(reset_state)]) :-
     Rows = [ [["a", "1-a"], 2],
@@ -90,6 +96,11 @@ test(reduce_stats,
 test(rereduce_count_sums_partial_counts,
      [setup(reset_state)]) :-
     handle_command(["rereduce", ["count."], [10, 20, 3]], Reply),
+    assertion(Reply == [true, [33]]).
+
+test(couchdb_35_rereduce_context_argument,
+     [setup(reset_state)]) :-
+    handle_command(["rereduce", ["count."], [10, 20, 3], "view-context"], Reply),
     assertion(Reply == [true, [33]]).
 
 test(rereduce_stats_combines_partials,

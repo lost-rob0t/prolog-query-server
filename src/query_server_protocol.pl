@@ -31,16 +31,21 @@ handle_command(["map_doc", Document], Results) :-
     must_be(dict, Document),
     findall(Index-AST, map_function(Index, AST), Functions),
     maplist(run_map(Document), Functions, Results).
-handle_command(["reduce", Sources, Rows], [true, Results]) :-
+% CouchDB 3.5 appends an opaque context value to reduce/rereduce requests.
+% Keep the documented three-argument form too for compatibility with older
+% CouchDB releases and direct protocol clients.
+handle_command(["reduce", Sources, Rows], Reply) :-
     !,
-    must_be(list, Sources),
-    must_be(list, Rows),
-    maplist(reduce_source(Rows, false), Sources, Results).
-handle_command(["rereduce", Sources, Values], [true, Results]) :-
+    reduce_command(Sources, Rows, Reply).
+handle_command(["reduce", Sources, Rows, _Context], Reply) :-
     !,
-    must_be(list, Sources),
-    must_be(list, Values),
-    maplist(reduce_source(Values, true), Sources, Results).
+    reduce_command(Sources, Rows, Reply).
+handle_command(["rereduce", Sources, Values], Reply) :-
+    !,
+    rereduce_command(Sources, Values, Reply).
+handle_command(["rereduce", Sources, Values, _Context], Reply) :-
+    !,
+    rereduce_command(Sources, Values, Reply).
 handle_command(["ddoc", "new", Id, Document], true) :-
     !,
     must_be(dict, Document),
@@ -57,6 +62,16 @@ handle_command([Command|_], _Reply) :-
     throw(error(domain_error(query_server_command, Command), _)).
 handle_command(Message, _Reply) :-
     throw(error(type_error(query_server_message, Message), _)).
+
+reduce_command(Sources, Rows, [true, Results]) :-
+    must_be(list, Sources),
+    must_be(list, Rows),
+    maplist(reduce_source(Rows, false), Sources, Results).
+
+rereduce_command(Sources, Values, [true, Results]) :-
+    must_be(list, Sources),
+    must_be(list, Values),
+    maplist(reduce_source(Values, true), Sources, Results).
 
 next_map_index(Index) :-
     findall(I, map_function(I, _), Existing),
