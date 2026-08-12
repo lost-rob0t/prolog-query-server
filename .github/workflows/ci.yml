@@ -27,7 +27,7 @@ jobs:
       - name: Load every Prolog module
         run: >-
           swipl -q --on-error=status -g
-          "load_files(['src/config.pl','src/auth.pl','src/couchdb.pl','src/builtins.pl','src/kb_analysis.pl','src/analysis_service.pl','src/expert_system.pl','src/kb_service.pl','src/query_server_protocol.pl','src/api.pl','server.pl'],[silent(true)]),halt."
+          "load_files(['src/config.pl','src/api_errors.pl','src/resource_limits.pl','src/auth.pl','src/couchdb.pl','src/builtins.pl','src/kb_analysis.pl','src/analysis_service.pl','src/expert_system.pl','src/kb_service.pl','src/metrics.pl','src/observability.pl','src/query_jobs.pl','src/query_server_protocol.pl','src/api.pl','server.pl'],[silent(true)]),halt."
       - name: Shellcheck test scripts
         run: shellcheck tests/*.sh
       - name: Validate Docker Compose
@@ -149,6 +149,15 @@ jobs:
       - name: Run static analysis and strict activation suite
         run: bash tests/kb_analysis.sh
 
+  resource-limits:
+    name: query-resource-limits-e2e
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - name: Run query, cancellation, request, KB, and proof resource-limit suite
+        run: bash tests/resource_limits.sh
+
   required:
     name: required
     if: always()
@@ -165,6 +174,7 @@ jobs:
       - builtins
       - auth
       - analysis
+      - resource-limits
     runs-on: ubuntu-latest
     steps:
       - name: Require every CI lane
@@ -172,4 +182,4 @@ jobs:
           RESULTS: ${{ join(needs.*.result, ' ') }}
         run: |
           echo "results: $RESULTS"
-          test "$RESULTS" = "success success success success success success success success success success success success"
+          test "$RESULTS" = "success success success success success success success success success success success success success"
