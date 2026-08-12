@@ -1,4 +1,5 @@
 :- use_module(library(http/json)).
+:- use_module(library(lists), [memberchk/2]).
 :- use_module(src/query_server_protocol).
 
 :- initialization(main, main).
@@ -20,11 +21,40 @@ protocol_loop :-
     (   Raw == end_of_file
     ->  true
     ;   normalize_json(Raw, Message),
-        catch(query_server_protocol:handle_command(Message, Reply),
+        catch(dispatch_command(Message, Reply),
               Error,
               error_reply(Error, Reply)),
         write_reply(Reply),
         protocol_loop
+    ).
+
+% CouchDB validates every view function in a design document through add_fun/1,
+% including reduce functions. Reducers are already parsed again when CouchDB
+% sends reduce/rereduce, so registration only needs to validate and acknowledge
+% the small reducer whitelist. Crucially, reducers are not added to map_function/2.
+dispatch_command(["add_fun", Source], true) :-
+    reduce_registration_source(Source),
+    !.
+dispatch_command(Message, Reply) :-
+    query_server_protocol:handle_command(Message, Reply).
+
+reduce_registration_source(Source) :-
+    text_atom(Source, Atom),
+    catch(read_term_from_atom(Atom,
+                              Reducer,
+                              [ syntax_errors(error),
+                                variable_names(Variables)
+                              ]),
+          _,
+          fail),
+    Variables == [],
+    memberchk(Reducer, [sum, count, min, max, stats]).
+
+text_atom(Value, Atom) :-
+    (   atom(Value)
+    ->  Atom = Value
+    ;   string(Value)
+    ->  atom_string(Atom, Value)
     ).
 
 error_reply(Error, ["error", "prolog_query_server", Message]) :-

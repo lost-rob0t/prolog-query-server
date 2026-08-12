@@ -80,6 +80,7 @@ printf '%s' "$explain" | python3 -c 'import json,sys; d=json.load(sys.stdin); as
 knowledge=$(curl -fsS 'http://127.0.0.1:8080/v1/knowledge?kb=ci')
 printf '%s' "$knowledge" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["count"] == 3; assert {x["type"] for x in d["documents"]} == {"prolog_fact","prolog_rule"}'
 
+# shellcheck disable=SC2016
 find_response=$(curl -fsS -u admin:admin \
   http://127.0.0.1:5984/prolog_kb/_find \
   -H 'content-type: application/json' \
