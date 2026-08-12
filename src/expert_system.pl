@@ -1,5 +1,7 @@
 :- module(expert_system,
           [ replace_kb/3,
+            upsert_document/3,
+            remove_document/2,
             run_query/4,
             validate_document/1,
             knowledge_base_loaded/1
@@ -18,6 +20,21 @@ replace_kb(KB, Documents, Stats) :-
     load_documents(Documents, KB, 0, 0, 0, Facts, Rules, Skipped),
     assertz(kb_loaded(KB)),
     Stats = _{facts:Facts, rules:Rules, skipped_disabled:Skipped}.
+
+upsert_document(KB, Document, Outcome) :-
+    required(Document, '_id', Source),
+    (   document_enabled(Document)
+    ->  document_kind(Document, Kind),
+        validate_kind(Kind, Document),
+        retractall(kb_clause(KB, _, _, Source)),
+        assert_document_clause(Kind, KB, Document),
+        Outcome = Kind
+    ;   retractall(kb_clause(KB, _, _, Source)),
+        Outcome = disabled
+    ).
+
+remove_document(KB, Source) :-
+    retractall(kb_clause(KB, _, _, Source)).
 
 run_query(KB, Query, Options, Result) :-
     (   kb_loaded(KB)
@@ -78,6 +95,13 @@ load_document(rule, KB, Document, Facts, Rules0, Facts, Rules) :-
     assertz(kb_clause(KB, Head, Body, Source)),
     Rules is Rules0 + 1.
 
+assert_document_clause(fact, KB, Document) :-
+    fact_clause(Document, Head, Body, Source),
+    assertz(kb_clause(KB, Head, Body, Source)).
+assert_document_clause(rule, KB, Document) :-
+    rule_clause(Document, Head, Body, Source),
+    assertz(kb_clause(KB, Head, Body, Source)).
+
 fact_clause(Document, Head, [], Source) :-
     require_type(Document, "prolog_fact"),
     required(Document, predicate, Predicate),
@@ -99,7 +123,6 @@ rule_clause(Document, Head, Body, Source) :-
     decode_goal(HeadDict, Head, [], Vars0),
     decode_body(BodyDicts, Body, Vars0, _Vars),
     document_source(Document, Source).
-
 decode_body([], [], Vars, Vars).
 decode_body([Item|Rest], [Goal|Goals], Vars0, Vars) :-
     decode_body_item(Item, Goal, Vars0, Vars1),
