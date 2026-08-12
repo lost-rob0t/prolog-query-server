@@ -27,7 +27,7 @@ jobs:
       - name: Load every Prolog module
         run: >-
           swipl -q --on-error=status -g
-          "load_files(['src/config.pl','src/api_errors.pl','src/resource_limits.pl','src/auth.pl','src/couchdb.pl','src/builtins.pl','src/kb_analysis.pl','src/analysis_service.pl','src/expert_system.pl','src/kb_service.pl','src/metrics.pl','src/observability.pl','src/query_jobs.pl','src/query_server_protocol.pl','src/api.pl','server.pl'],[silent(true)]),halt."
+          "use_module('src/config.pl',[]),use_module('src/api_errors.pl',[]),use_module('src/resource_limits.pl',[]),use_module('src/auth.pl',[]),use_module('src/couchdb.pl',[]),use_module('src/builtins.pl',[]),use_module('src/kb_analysis.pl',[]),use_module('src/analysis_service.pl',[]),use_module('src/expert_system.pl',[]),use_module('src/kb_service.pl',[]),use_module('src/metrics.pl',[]),use_module('src/observability.pl',[]),use_module('src/query_jobs.pl',[]),use_module('src/query_server_protocol.pl',[]),use_module('src/api.pl',[]),load_files('server.pl',[silent(true)]),halt."
       - name: Shellcheck test scripts
         run: shellcheck tests/*.sh
       - name: Validate Docker Compose
