@@ -2,30 +2,114 @@ name: ci
 
 on:
   push:
+    branches: ['**']
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  test:
+  static:
+    name: static-and-config
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install validation tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y swi-prolog-nox shellcheck
+      - name: Load every Prolog module
+        run: >-
+          swipl -q -g
+          "load_files(['src/config.pl','src/couchdb.pl','src/expert_system.pl','src/kb_service.pl','src/query_server_protocol.pl','src/api.pl','server.pl'],[silent(true)]),halt."
+      - name: Shellcheck test scripts
+        run: shellcheck tests/*.sh
+      - name: Validate Docker Compose
+        run: docker compose config -q
+
+  unit-swipl-10:
+    name: unit-swipl-10.0.2
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     container:
       image: swipl:10.0.2
     steps:
       - uses: actions/checkout@v4
-      - name: Run Prolog tests
+      - name: Run full PLUnit suite
         run: cd tests && swipl -q -s run.pl --
 
-  docker-build:
+  unit-ubuntu:
+    name: unit-ubuntu-packaged-swipl
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+      - name: Install distro SWI-Prolog
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y swi-prolog-nox
+      - name: Show runtime version
+        run: swipl --version
+      - name: Run full PLUnit suite
+        run: cd tests && swipl -q -s run.pl --
+
+  protocol-process:
+    name: couchdb-query-server-process
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    container:
+      image: swipl:10.0.2
+    steps:
+      - uses: actions/checkout@v4
+      - name: Exercise stdin/stdout query-server protocol
+        run: tests/protocol_process.sh
+
+  docker-build:
+    name: docker-images
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
       - name: Build API image
-        run: docker build -t prolog-query-server:test .
+        run: docker buildx build --load -t prolog-query-server:test .
       - name: Build CouchDB image with Prolog query server
-        run: docker build -f docker/couchdb/Dockerfile -t couchdb-prolog:test .
+        run: docker buildx build --load -f docker/couchdb/Dockerfile -t couchdb-prolog:test .
+      - name: Verify API image entrypoint loads
+        run: docker run --rm prolog-query-server:test swipl -q -g "use_module(src/expert_system),halt."
+      - name: Verify SWI-Prolog exists in CouchDB image
+        run: docker run --rm --entrypoint /usr/bin/swipl couchdb-prolog:test --version
 
   integration:
+    name: couchdb-expert-system-e2e
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - name: Run CouchDB + expert-system smoke test
+      - name: Run durable CouchDB + expert-system integration suite
         run: tests/integration.sh
+
+  required:
+    name: required
+    if: always()
+    needs:
+      - static
+      - unit-swipl-10
+      - unit-ubuntu
+      - protocol-process
+      - docker-build
+      - integration
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every CI lane
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "results: $RESULTS"
+          test "$RESULTS" = "success success success success success success"
