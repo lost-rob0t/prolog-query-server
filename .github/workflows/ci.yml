@@ -95,6 +95,15 @@ jobs:
       - name: Run durable CouchDB + expert-system integration suite
         run: tests/integration.sh
 
+  changes-sync:
+    name: couchdb-changes-sync-e2e
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run incremental CouchDB changes synchronization suite
+        run: tests/changes_sync.sh
+
   required:
     name: required
     if: always()
@@ -105,6 +114,7 @@ jobs:
       - protocol-process
       - docker-build
       - integration
+      - changes-sync
     runs-on: ubuntu-latest
     steps:
       - name: Require every CI lane
@@ -112,4 +122,4 @@ jobs:
           RESULTS: ${{ join(needs.*.result, ' ') }}
         run: |
           echo "results: $RESULTS"
-          test "$RESULTS" = "success success success success success success"
+          test "$RESULTS" = "success success success success success success success"
