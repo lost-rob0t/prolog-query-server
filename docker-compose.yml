@@ -24,6 +24,9 @@ services:
       COUCHDB_DATABASE: prolog_kb
       COUCHDB_USER: admin
       COUCHDB_PASSWORD: admin
+      PQS_AUTH_MODE: ${PQS_AUTH_MODE:-off}
+      PQS_READ_TOKEN: ${PQS_READ_TOKEN:-}
+      PQS_WRITE_TOKEN: ${PQS_WRITE_TOKEN:-}
     ports:
       - "8080:8080"
     depends_on:

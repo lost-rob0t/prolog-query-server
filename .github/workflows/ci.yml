@@ -27,7 +27,7 @@ jobs:
       - name: Load every Prolog module
         run: >-
           swipl -q -g
-          "load_files(['src/config.pl','src/couchdb.pl','src/builtins.pl','src/expert_system.pl','src/kb_service.pl','src/query_server_protocol.pl','src/api.pl','server.pl'],[silent(true)]),halt."
+          "load_files(['src/config.pl','src/auth.pl','src/couchdb.pl','src/builtins.pl','src/expert_system.pl','src/kb_service.pl','src/query_server_protocol.pl','src/api.pl','server.pl'],[silent(true)]),halt."
       - name: Shellcheck test scripts
         run: shellcheck tests/*.sh
       - name: Validate Docker Compose
@@ -131,6 +131,15 @@ jobs:
       - name: Run safe builtin registry suite
         run: bash tests/builtins.sh
 
+  auth:
+    name: api-auth-rbac-e2e
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run API authentication and authorization suite
+        run: bash tests/auth.sh
+
   required:
     name: required
     if: always()
@@ -145,6 +154,7 @@ jobs:
       - knowledge-crud
       - proof-tree
       - builtins
+      - auth
     runs-on: ubuntu-latest
     steps:
       - name: Require every CI lane
@@ -152,4 +162,4 @@ jobs:
           RESULTS: ${{ join(needs.*.result, ' ') }}
         run: |
           echo "results: $RESULTS"
-          test "$RESULTS" = "success success success success success success success success success success"
+          test "$RESULTS" = "success success success success success success success success success success success"
