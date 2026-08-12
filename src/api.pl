@@ -6,6 +6,7 @@
 :- use_module(library(error)).
 :- use_module(couchdb).
 :- use_module(kb_service).
+:- use_module(builtins).
 
 :- http_handler(root(.), index_handler, [method(get)]).
 :- http_handler(root(health), health_handler, [method(get)]).
@@ -17,12 +18,13 @@
 :- http_handler(root('v1/knowledge'), knowledge_handler, [method(get)]).
 :- http_handler(root('v1/document'), knowledge_document_handler, []).
 :- http_handler(root('v1/bulk'), bulk_handler, [method(post)]).
+:- http_handler(root('v1/builtins'), builtins_handler, [method(get)]).
 :- http_handler(root('v1/releases'), releases_handler, [method(get)]).
 :- http_handler(root('v1/releases/activate'), activate_release_handler, [method(post)]).
 
 index_handler(_Request) :-
     reply_json_dict(_{service:"prolog-query-server",
-                      version:"0.4.0",
+                      version:"0.5.0",
                       storage:"couchdb",
                       engine:"swi-prolog"}).
 
@@ -79,6 +81,10 @@ bulk_handler(Request) :-
                kb_service:bulk_knowledge_documents(Input, Saved),
                reply_json_dict(Saved)
              )).
+
+builtins_handler(_Request) :-
+    builtins:builtin_catalog(Catalog),
+    reply_json_dict(Catalog).
 
 query_handler(Request) :-
     api_call(( read_json(Request, Input),
