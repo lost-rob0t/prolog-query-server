@@ -12,11 +12,10 @@ authorize(_Request, _Capability) :-
     !.
 authorize(Request, Capability) :-
     config:api_auth_mode(required),
-    bearer_token(Request, Supplied),
-    authorize_token(Capability, Supplied),
-    !.
-authorize(_Request, Capability) :-
-    throw(error(permission_error(access, api_capability, Capability), _)).
+    (   bearer_token(Request, Supplied)
+    ->  authorize_token(Capability, Supplied)
+    ;   throw(error(permission_error(access, api_authentication, missing_bearer_token), _))
+    ).
 
 auth_status(Status) :-
     config:api_auth_mode(Mode),
@@ -31,18 +30,29 @@ auth_status(Status) :-
                    write_token_configured:WriteConfigured}
     ).
 
-authorize_token(write, Supplied) :-
-    config:api_write_token(Expected),
-    constant_time_token_equal(Supplied, Expected).
 authorize_token(read, Supplied) :-
-    (   config:api_read_token(ReadToken),
-        constant_time_token_equal(Supplied, ReadToken)
+    configured_tokens(ReadToken, WriteToken),
+    (   constant_time_token_equal(Supplied, ReadToken)
+    ;   constant_time_token_equal(Supplied, WriteToken)
+    ),
+    !.
+authorize_token(read, _Supplied) :-
+    throw(error(permission_error(access, api_authentication, invalid_bearer_token), _)).
+authorize_token(write, Supplied) :-
+    configured_tokens(ReadToken, WriteToken),
+    (   constant_time_token_equal(Supplied, WriteToken)
     ->  true
-    ;   config:api_write_token(WriteToken),
-        constant_time_token_equal(Supplied, WriteToken)
-    ).
+    ;   constant_time_token_equal(Supplied, ReadToken)
+    ->  throw(error(permission_error(access, api_capability, write), _))
+    ;   throw(error(permission_error(access, api_authentication, invalid_bearer_token), _))
+    ),
+    !.
 authorize_token(Capability, _Supplied) :-
     throw(error(domain_error(api_capability, Capability), _)).
+
+configured_tokens(ReadToken, WriteToken) :-
+    config:api_read_token(ReadToken),
+    config:api_write_token(WriteToken).
 
 bearer_token(Request, Token) :-
     memberchk(authorization(Header0), Request),
