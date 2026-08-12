@@ -10,13 +10,13 @@ wait_http(){ local u="$1"; shift; for _ in $(seq 1 120); do curl -fsS "$@" "$u" 
 replicate_a_to_b(){
   curl -fsS -u admin:admin -X POST http://127.0.0.1:5984/_replicate \
     -H 'content-type: application/json' \
-    -d '{"source":"prolog_kb","target":"http://admin:admin@couchdb-b:5984/prolog_kb","create_target":true}'
+    -d '{"source":"http://admin:admin@couchdb-a:5984/prolog_kb","target":"http://admin:admin@couchdb-b:5984/prolog_kb","create_target":true}'
 }
 
 replicate_b_to_a(){
   curl -fsS -u admin:admin -X POST http://127.0.0.1:5985/_replicate \
     -H 'content-type: application/json' \
-    -d '{"source":"prolog_kb","target":"http://admin:admin@couchdb-a:5984/prolog_kb","create_target":true}'
+    -d '{"source":"http://admin:admin@couchdb-b:5984/prolog_kb","target":"http://admin:admin@couchdb-a:5984/prolog_kb","create_target":true}'
 }
 
 "${compose[@]}" up -d --build
