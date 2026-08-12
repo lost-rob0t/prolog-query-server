@@ -157,6 +157,8 @@ jobs:
       - uses: actions/checkout@v7
       - name: Run query, cancellation, request, KB, and proof resource-limit suite
         run: bash tests/resource_limits.sh
+      - name: Prove cancellation rollback keeps the loaded KB atomic
+        run: bash tests/cancellation_atomicity.sh
 
   required:
     name: required
