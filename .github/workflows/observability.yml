@@ -1,0 +1,68 @@
+name: observability
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: observability-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  metrics-unit-swipl-10:
+    name: metrics-unit-swipl-10.0.2
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    container:
+      image: swipl:10.0.2
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run metrics and correlation-id PLUnit suite
+        run: cd tests && swipl -q -g "load_files(['metrics_tests.pl'],[silent(true)]),(run_tests(metrics)->halt(0);halt(1))."
+
+  metrics-unit-ubuntu:
+    name: metrics-unit-ubuntu-packaged-swipl
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install distro SWI-Prolog
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y swi-prolog-nox
+      - name: Load observability modules with syntax errors fatal
+        run: >-
+          swipl -q --on-error=status -g
+          "load_files(['src/metrics.pl','src/observability.pl','src/api.pl'],[silent(true)]),halt."
+      - name: Run metrics and correlation-id PLUnit suite
+        run: cd tests && swipl -q -g "load_files(['metrics_tests.pl'],[silent(true)]),(run_tests(metrics)->halt(0);halt(1))."
+
+  metrics-e2e:
+    name: prometheus-privacy-e2e
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run privacy-safe Prometheus metrics suite
+        run: bash tests/metrics.sh
+
+  observability-required:
+    name: observability-required
+    if: always()
+    needs:
+      - metrics-unit-swipl-10
+      - metrics-unit-ubuntu
+      - metrics-e2e
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require observability lanes
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "results: $RESULTS"
+          test "$RESULTS" = "success success success"
