@@ -1,0 +1,40 @@
+name: issue-22-merge-guard
+
+on:
+  push:
+    branches: [feature/issue-22-fail-closed-conflicts]
+    paths: [.github/workflows/issue-22-merge-guard.yml]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/issue-22-fail-closed-conflicts
+          fetch-depth: 0
+      - name: Run conflict policy and enforce draft-on-failure
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set +e
+          bash tests/conflict_policy.sh
+          result=$?
+          set -e
+
+          if [ "$result" -ne 0 ]; then
+            gh pr ready 23 --undo --repo lost-rob0t/prolog-query-server || true
+          fi
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm .github/workflows/issue-22-merge-guard.yml
+          git commit -m 'Remove one-shot issue 22 merge guard'
+          git push origin HEAD:feature/issue-22-fail-closed-conflicts
+
+          exit "$result"
