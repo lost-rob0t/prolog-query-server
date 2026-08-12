@@ -18,7 +18,8 @@
             max_rule_goals/1,
             max_request_bytes/1,
             max_active_queries/1,
-            query_result_ttl_seconds/1
+            query_result_ttl_seconds/1,
+            changes_page_size/1
           ]).
 
 server_port(Port) :-
@@ -92,6 +93,9 @@ max_active_queries(Value) :-
 query_result_ttl_seconds(Value) :-
     env_positive_integer('PQS_QUERY_RESULT_TTL_SECONDS', 300, Value).
 
+changes_page_size(Value) :-
+    env_bounded_positive_integer('PQS_CHANGES_PAGE_SIZE', 100, 1000, Value).
+
 env_required(Name, Value) :-
     (   getenv(Name, Value),
         Value \== ''
@@ -124,4 +128,13 @@ env_positive_integer(Name, Default, Value) :-
         ;   throw(error(domain_error(positive_integer_environment(Name), Raw), _))
         )
     ;   Value = Default
+    ).
+
+env_bounded_positive_integer(Name, Default, Max, Value) :-
+    env_positive_integer(Name, Default, Parsed),
+    (   Parsed =< Max
+    ->  Value = Parsed
+    ;   throw(error(domain_error(bounded_positive_integer_environment(Name, Max),
+                                 Parsed),
+                    _))
     ).
