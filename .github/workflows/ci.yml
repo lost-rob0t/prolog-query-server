@@ -26,7 +26,7 @@ jobs:
           sudo apt-get install -y swi-prolog-nox shellcheck
       - name: Load every Prolog module
         run: >-
-          swipl -q -g
+          swipl -q --on-error=status -g
           "load_files(['src/config.pl','src/auth.pl','src/couchdb.pl','src/builtins.pl','src/kb_analysis.pl','src/analysis_service.pl','src/expert_system.pl','src/kb_service.pl','src/query_server_protocol.pl','src/api.pl','server.pl'],[silent(true)]),halt."
       - name: Shellcheck test scripts
         run: shellcheck tests/*.sh
