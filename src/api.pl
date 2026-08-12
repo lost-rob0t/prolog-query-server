@@ -15,10 +15,12 @@
 :- http_handler(root('v1/explain'), explain_handler, [method(post)]).
 :- http_handler(root('v1/reload'), reload_handler, [method(post)]).
 :- http_handler(root('v1/knowledge'), knowledge_handler, [method(get)]).
+:- http_handler(root('v1/releases'), releases_handler, [method(get)]).
+:- http_handler(root('v1/releases/activate'), activate_release_handler, [method(post)]).
 
 index_handler(_Request) :-
     reply_json_dict(_{service:"prolog-query-server",
-                      version:"0.1.0",
+                      version:"0.2.0",
                       storage:"couchdb",
                       engine:"swi-prolog"}).
 
@@ -58,18 +60,38 @@ explain_handler(Request) :-
 reload_handler(Request) :-
     api_call(( read_json(Request, Input),
                input_kb(Input, KB),
-               kb_service:refresh_kb(KB, Stats),
+               optional(Input, release, null, Release),
+               reload_release(KB, Release, Stats),
                reply_json_dict(_{kb:KB, refresh:Stats})
              )).
 
 knowledge_handler(Request) :-
     api_call(( http_parameters(Request,
+                               [ kb(KBAtom, [default(default)]),
+                                 release(ReleaseAtom, [default('')])
+                               ]),
+               atom_string(KBAtom, KB),
+               knowledge_for_release(KB, ReleaseAtom, Release, Documents),
+               length(Documents, Count),
+               reply_json_dict(_{kb:KB,
+                                 release:Release,
+                                 count:Count,
+                                 documents:Documents})
+             )).
+
+releases_handler(Request) :-
+    api_call(( http_parameters(Request,
                                [ kb(KBAtom, [default(default)])
                                ]),
                atom_string(KBAtom, KB),
-               kb_service:knowledge_documents(KB, Documents),
-               length(Documents, Count),
-               reply_json_dict(_{kb:KB, count:Count, documents:Documents})
+               kb_service:release_status(KB, Status),
+               reply_json_dict(Status)
+             )).
+
+activate_release_handler(Request) :-
+    api_call(( read_json(Request, Input),
+               kb_service:activate_release(Input, Saved),
+               reply_json_dict(Saved)
              )).
 
 query_request(Input, ForceTrace, KB, Goal, Options) :-
@@ -79,6 +101,7 @@ query_request(Input, ForceTrace, KB, Goal, Options) :-
     optional(Input, max_solutions, 100, MaxSolutions),
     optional(Input, refresh, true, Refresh),
     optional(Input, trace, false, RequestedTrace),
+    optional(Input, release, null, Release),
     bool(Refresh),
     bool(RequestedTrace),
     (   ForceTrace == true
@@ -88,8 +111,24 @@ query_request(Input, ForceTrace, KB, Goal, Options) :-
     Options = [ max_depth(MaxDepth),
                 max_solutions(MaxSolutions),
                 refresh(Refresh),
-                trace(Trace)
+                trace(Trace),
+                release(Release)
               ].
+
+reload_release(KB, null, Stats) :-
+    !,
+    kb_service:refresh_kb(KB, Stats).
+reload_release(KB, Release, Stats) :-
+    kb_service:refresh_kb(KB, Release, Stats).
+
+knowledge_for_release(KB, '', Release, Documents) :-
+    !,
+    kb_service:release_status(KB, Status),
+    get_dict(active_release, Status, Release),
+    kb_service:knowledge_documents(KB, Release, Documents).
+knowledge_for_release(KB, ReleaseAtom, Release, Documents) :-
+    atom_string(ReleaseAtom, Release),
+    kb_service:knowledge_documents(KB, Release, Documents).
 
 input_kb(Input, KB) :-
     optional(Input, kb, "default", KB),
@@ -112,7 +151,9 @@ reply_error_with_status(Error, Status) :-
     message_to_string(Error, Message),
     reply_json_dict(_{error:Message}, [status(Status)]).
 
+error_status(error(couchdb_error(409, _), _), 409) :- !.
 error_status(error(couchdb_error(_, _), _), 502) :- !.
+error_status(error(permission_error(modify, active_knowledge_release, _), _), 409) :- !.
 error_status(error(existence_error(knowledge_base, _), _), 409) :- !.
 error_status(_, 400).
 

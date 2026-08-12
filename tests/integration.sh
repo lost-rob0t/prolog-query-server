@@ -44,17 +44,17 @@ printf '%s' "$health" | python3 -c 'import json,sys; d=json.load(sys.stdin); ass
 fact_response=$(curl -fsS http://127.0.0.1:8080/v1/facts \
   -H 'content-type: application/json' \
   -d '{"kb":"ci","predicate":"human","args":["socrates"],"provenance":{"source":"integration"}}')
-printf '%s' "$fact_response" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["couchdb"]["ok"] is True'
+printf '%s' "$fact_response" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["couchdb"]["ok"] is True; assert d["document"]["release"] == "legacy"'
 
 rule_response=$(curl -fsS http://127.0.0.1:8080/v1/rules \
   -H 'content-type: application/json' \
   -d '{"kb":"ci","head":{"predicate":"mortal","args":[{"var":"X"}]},"body":[{"predicate":"human","args":[{"var":"X"}]}]}')
-printf '%s' "$rule_response" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["couchdb"]["ok"] is True'
+printf '%s' "$rule_response" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["couchdb"]["ok"] is True; assert d["document"]["release"] == "legacy"'
 
 query_response=$(curl -fsS http://127.0.0.1:8080/v1/query \
   -H 'content-type: application/json' \
   -d '{"kb":"ci","goal":{"predicate":"mortal","args":[{"var":"Who"}]}}')
-printf '%s' "$query_response" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["count"] == 1; assert d["solutions"][0]["bindings"]["Who"] == "socrates"; assert d["refresh"]["reloaded"] is True'
+printf '%s' "$query_response" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["count"] == 1; assert d["solutions"][0]["bindings"]["Who"] == "socrates"; assert d["release"] == "legacy"; assert d["refresh"]["reloaded"] is True'
 
 # Prove CouchDB is the source of truth: save a new fact without refreshing the
 # in-memory snapshot. refresh=false must stay stale; refresh=true must observe it.
@@ -78,7 +78,7 @@ explain=$(curl -fsS http://127.0.0.1:8080/v1/explain \
 printf '%s' "$explain" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["count"] == 2; assert all(len(s["sources"]) == 2 for s in d["solutions"]); assert all(all(src != "unsaved" for src in s["sources"]) for s in d["solutions"])'
 
 knowledge=$(curl -fsS 'http://127.0.0.1:8080/v1/knowledge?kb=ci')
-printf '%s' "$knowledge" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["count"] == 3; assert {x["type"] for x in d["documents"]} == {"prolog_fact","prolog_rule"}'
+printf '%s' "$knowledge" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["release"] == "legacy"; assert d["count"] == 3; assert {x["type"] for x in d["documents"]} == {"prolog_fact","prolog_rule"}'
 
 # shellcheck disable=SC2016
 find_response=$(curl -fsS -u admin:admin \
@@ -93,7 +93,7 @@ curl -fsS http://127.0.0.1:8080/v1/facts \
   -d '{"kb":"ci","enabled":false,"predicate":"ghost","args":["hidden"]}' >/dev/null
 reload=$(curl -fsS http://127.0.0.1:8080/v1/reload \
   -H 'content-type: application/json' -d '{"kb":"ci"}')
-printf '%s' "$reload" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["refresh"]["documents"] == 4; assert d["refresh"]["skipped_disabled"] == 1'
+printf '%s' "$reload" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["refresh"]["release"] == "legacy"; assert d["refresh"]["documents"] == 4; assert d["refresh"]["skipped_disabled"] == 1'
 ghost=$(curl -fsS http://127.0.0.1:8080/v1/query \
   -H 'content-type: application/json' \
   -d '{"kb":"ci","refresh":false,"goal":{"predicate":"ghost","args":[{"var":"X"}]}}')
@@ -131,7 +131,7 @@ wait_http http://127.0.0.1:8080/health
 after_restart=$(curl -fsS http://127.0.0.1:8080/v1/query \
   -H 'content-type: application/json' \
   -d '{"kb":"ci","refresh":false,"goal":{"predicate":"mortal","args":[{"var":"Who"}]}}')
-printf '%s' "$after_restart" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["count"] == 2; assert d["refresh"]["reloaded"] is True'
+printf '%s' "$after_restart" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["count"] == 2; assert d["release"] == "legacy"; assert d["refresh"]["reloaded"] is True'
 
 # Exercise CouchDB's native external query-server path, including reduce.
 curl -fsS -u admin:admin -X PUT \
@@ -147,5 +147,101 @@ printf '%s' "$view_response" | python3 -c 'import json,sys; d=json.load(sys.stdi
 reduce_response=$(curl -fsS -u admin:admin \
   'http://127.0.0.1:5984/prolog_kb/_design/by_type/_view/by_type?group=true')
 printf '%s' "$reduce_response" | python3 -c 'import json,sys; d=json.load(sys.stdin); counts={r["key"]:r["value"] for r in d["rows"]}; assert counts == {"prolog_fact":3,"prolog_rule":1}'
+
+# Versioned KB releases: staged documents are invisible to default queries until
+# one manifest revision atomically changes the active release.
+release_status=$(curl -fsS 'http://127.0.0.1:8080/v1/releases?kb=ci')
+printf '%s' "$release_status" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["active_release"] == "legacy"; assert d["manifest"] is None; assert d["legacy_fallback"] is True'
+
+curl -fsS http://127.0.0.1:8080/v1/facts \
+  -H 'content-type: application/json' \
+  -d '{"kb":"ci","release":"alpha","predicate":"human","args":["aristotle"]}' >/dev/null
+curl -fsS http://127.0.0.1:8080/v1/rules \
+  -H 'content-type: application/json' \
+  -d '{"kb":"ci","release":"alpha","head":{"predicate":"mortal","args":[{"var":"X"}]},"body":[{"predicate":"human","args":[{"var":"X"}]}]}' >/dev/null
+
+alpha_pinned=$(curl -fsS http://127.0.0.1:8080/v1/query \
+  -H 'content-type: application/json' \
+  -d '{"kb":"ci","release":"alpha","goal":{"predicate":"mortal","args":[{"var":"Who"}]}}')
+printf '%s' "$alpha_pinned" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["release"] == "alpha"; assert d["count"] == 1; assert d["solutions"][0]["bindings"]["Who"] == "aristotle"'
+
+legacy_default=$(curl -fsS http://127.0.0.1:8080/v1/query \
+  -H 'content-type: application/json' \
+  -d '{"kb":"ci","goal":{"predicate":"mortal","args":[{"var":"Who"}]}}')
+printf '%s' "$legacy_default" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["release"] == "legacy"; assert d["count"] == 2'
+
+activate_alpha=$(curl -fsS http://127.0.0.1:8080/v1/releases/activate \
+  -H 'content-type: application/json' \
+  -d '{"kb":"ci","release":"alpha"}')
+alpha_rev=$(printf '%s' "$activate_alpha" | python3 -c 'import json,sys; print(json.load(sys.stdin)["couchdb"]["rev"])')
+printf '%s' "$activate_alpha" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["active_release"] == "alpha"; assert d["couchdb"]["ok"] is True'
+
+alpha_default=$(curl -fsS http://127.0.0.1:8080/v1/query \
+  -H 'content-type: application/json' \
+  -d '{"kb":"ci","goal":{"predicate":"mortal","args":[{"var":"Who"}]}}')
+printf '%s' "$alpha_default" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["release"] == "alpha"; assert d["count"] == 1; assert d["solutions"][0]["bindings"]["Who"] == "aristotle"'
+
+# Active non-legacy releases are immutable, and implicit writes are rejected so
+# callers must stage a different release explicitly.
+assert_status 409 http://127.0.0.1:8080/v1/facts \
+  '{"kb":"ci","release":"alpha","predicate":"human","args":["blocked-write"]}'
+assert_status 400 http://127.0.0.1:8080/v1/facts \
+  '{"kb":"ci","predicate":"human","args":["ambiguous-write"]}'
+
+curl -fsS http://127.0.0.1:8080/v1/facts \
+  -H 'content-type: application/json' \
+  -d '{"kb":"ci","release":"beta","predicate":"human","args":["hypatia"]}' >/dev/null
+curl -fsS http://127.0.0.1:8080/v1/rules \
+  -H 'content-type: application/json' \
+  -d '{"kb":"ci","release":"beta","head":{"predicate":"mortal","args":[{"var":"X"}]},"body":[{"predicate":"human","args":[{"var":"X"}]}]}' >/dev/null
+
+alpha_still_active=$(curl -fsS http://127.0.0.1:8080/v1/query \
+  -H 'content-type: application/json' \
+  -d '{"kb":"ci","goal":{"predicate":"mortal","args":[{"var":"Who"}]}}')
+printf '%s' "$alpha_still_active" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["release"] == "alpha"; assert d["solutions"][0]["bindings"]["Who"] == "aristotle"'
+
+activate_beta_body=$(python3 -c 'import json,sys; print(json.dumps({"kb":"ci","release":"beta","_rev":sys.argv[1]}))' "$alpha_rev")
+activate_beta=$(curl -fsS http://127.0.0.1:8080/v1/releases/activate \
+  -H 'content-type: application/json' \
+  -d "$activate_beta_body")
+beta_rev=$(printf '%s' "$activate_beta" | python3 -c 'import json,sys; print(json.load(sys.stdin)["couchdb"]["rev"])')
+
+# The old manifest revision is stale after the beta cutover.
+stale_manifest_body=$(python3 -c 'import json,sys; print(json.dumps({"kb":"ci","release":"alpha","_rev":sys.argv[1]}))' "$alpha_rev")
+assert_status 409 http://127.0.0.1:8080/v1/releases/activate "$stale_manifest_body"
+
+beta_default=$(curl -fsS http://127.0.0.1:8080/v1/query \
+  -H 'content-type: application/json' \
+  -d '{"kb":"ci","goal":{"predicate":"mortal","args":[{"var":"Who"}]}}')
+printf '%s' "$beta_default" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["release"] == "beta"; assert d["count"] == 1; assert d["solutions"][0]["bindings"]["Who"] == "hypatia"'
+
+alpha_history=$(curl -fsS http://127.0.0.1:8080/v1/query \
+  -H 'content-type: application/json' \
+  -d '{"kb":"ci","release":"alpha","goal":{"predicate":"mortal","args":[{"var":"Who"}]}}')
+printf '%s' "$alpha_history" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["release"] == "alpha"; assert d["solutions"][0]["bindings"]["Who"] == "aristotle"'
+
+beta_knowledge=$(curl -fsS 'http://127.0.0.1:8080/v1/knowledge?kb=ci')
+printf '%s' "$beta_knowledge" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["release"] == "beta"; assert d["count"] == 2'
+alpha_knowledge=$(curl -fsS 'http://127.0.0.1:8080/v1/knowledge?kb=ci&release=alpha')
+printf '%s' "$alpha_knowledge" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["release"] == "alpha"; assert d["count"] == 2'
+
+# Restart reconstruction resolves the active manifest before rebuilding the
+# runtime, so beta remains active without any in-process state.
+docker compose restart prolog-query-server
+wait_http http://127.0.0.1:8080/health
+beta_after_restart=$(curl -fsS http://127.0.0.1:8080/v1/query \
+  -H 'content-type: application/json' \
+  -d '{"kb":"ci","refresh":false,"goal":{"predicate":"mortal","args":[{"var":"Who"}]}}')
+printf '%s' "$beta_after_restart" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["release"] == "beta"; assert d["refresh"]["reloaded"] is True; assert d["solutions"][0]["bindings"]["Who"] == "hypatia"'
+
+# Rollback is another single manifest revision update; the old release remains
+# queryable and becomes active again without rewriting its knowledge documents.
+rollback_body=$(python3 -c 'import json,sys; print(json.dumps({"kb":"ci","release":"alpha","_rev":sys.argv[1]}))' "$beta_rev")
+curl -fsS http://127.0.0.1:8080/v1/releases/activate \
+  -H 'content-type: application/json' -d "$rollback_body" >/dev/null
+rollback_query=$(curl -fsS http://127.0.0.1:8080/v1/query \
+  -H 'content-type: application/json' \
+  -d '{"kb":"ci","goal":{"predicate":"mortal","args":[{"var":"Who"}]}}')
+printf '%s' "$rollback_query" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["release"] == "alpha"; assert d["solutions"][0]["bindings"]["Who"] == "aristotle"'
 
 echo "extended CouchDB expert-system integration suite passed"

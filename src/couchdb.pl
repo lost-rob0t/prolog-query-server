@@ -2,7 +2,12 @@
           [ ensure_storage/0,
             health/1,
             save_document/2,
-            find_kb_documents/2
+            put_document/3,
+            get_document/2,
+            find_kb_documents/2,
+            find_kb_documents/3,
+            get_kb_manifest/2,
+            put_kb_manifest/4
           ]).
 
 :- use_module(library(http/http_client)).
@@ -30,10 +35,64 @@ save_document(Document, Reply) :-
               [json_object(dict), status_code(Status)|Options]),
     require_status(Status, [201, 202], Reply).
 
+put_document(Id, Document0, Reply) :-
+    ensure_storage,
+    document_url(Id, URL),
+    put_dict('_id', Document0, Id, Document),
+    request_options(Options),
+    http_put(URL,
+             json(Document),
+             Reply,
+             [json_object(dict), status_code(Status)|Options]),
+    require_status(Status, [201, 202], Reply).
+
+get_document(Id, Document) :-
+    ensure_storage,
+    document_url(Id, URL),
+    request_options(Options),
+    http_get(URL,
+             Reply,
+             [json_object(dict), status_code(Status)|Options]),
+    (   Status =:= 200
+    ->  Document = Reply
+    ;   Status =:= 404
+    ->  Document = none
+    ;   throw(error(couchdb_error(Status, Reply), _))
+    ).
+
 find_kb_documents(KB, Documents) :-
     ensure_storage,
     find_pages(KB, 500, null, [], Reversed),
     reverse(Reversed, Documents).
+
+find_kb_documents(KB, Release, Documents) :-
+    find_kb_documents(KB, AllDocuments),
+    include(document_in_release(Release), AllDocuments, Documents).
+
+get_kb_manifest(KB, Manifest) :-
+    manifest_id(KB, Id),
+    get_document(Id, Manifest).
+
+put_kb_manifest(KB, Release, ExpectedRev, Reply) :-
+    manifest_id(KB, Id),
+    Base = _{type:"prolog_kb_manifest",
+             kb:KB,
+             active_release:Release},
+    (   ExpectedRev == null
+    ->  Document = Base
+    ;   put_dict('_rev', Base, ExpectedRev, Document)
+    ),
+    put_document(Id, Document, Reply).
+
+document_in_release(Release, Document) :-
+    document_release(Document, DocumentRelease),
+    DocumentRelease == Release.
+
+document_release(Document, Release) :-
+    (   get_dict(release, Document, Release0)
+    ->  Release = Release0
+    ;   Release = "legacy"
+    ).
 
 find_pages(KB, Limit, Bookmark, Acc0, Acc) :-
     find_page(KB, Limit, Bookmark, Page, NextBookmark),
@@ -101,6 +160,14 @@ database_url(URL) :-
 database_endpoint(Path, URL) :-
     database_url(Base),
     format(atom(URL), '~w/~w', [Base, Path]).
+
+document_url(Id, URL) :-
+    database_url(Base),
+    uri_encoded(path, Id, EncodedId),
+    format(atom(URL), '~w/~w', [Base, EncodedId]).
+
+manifest_id(KB, Id) :-
+    format(string(Id), 'prolog-kb-manifest:~s', [KB]).
 
 require_status(Status, Allowed, _Reply) :-
     memberchk(Status, Allowed),
