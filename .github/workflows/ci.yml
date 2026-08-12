@@ -22,3 +22,10 @@ jobs:
         run: docker build -t prolog-query-server:test .
       - name: Build CouchDB image with Prolog query server
         run: docker build -f docker/couchdb/Dockerfile -t couchdb-prolog:test .
+
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run CouchDB + expert-system smoke test
+        run: tests/integration.sh
