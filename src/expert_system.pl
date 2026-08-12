@@ -13,15 +13,17 @@
 :- use_module(library(time)).
 :- use_module(builtins).
 :- use_module(config).
-:- use_module(resource_limits).
+:- use_module(resource_limits, []).
 
 :- dynamic kb_clause/6.
 :- dynamic kb_loaded/1.
+:- dynamic kb_document_bytes/3.
 
 replace_kb(KB, Documents, Stats) :-
     resource_limits:validate_snapshot(Documents),
     retractall(kb_clause(KB, _, _, _, _, _)),
     retractall(kb_loaded(KB)),
+    retractall(kb_document_bytes(KB, _, _)),
     load_documents(Documents, KB, 0, 0, 0, Facts, Rules, Skipped),
     assertz(kb_loaded(KB)),
     Stats = _{facts:Facts, rules:Rules, skipped_disabled:Skipped}.
@@ -29,18 +31,60 @@ replace_kb(KB, Documents, Stats) :-
 upsert_document(KB, Document, Outcome) :-
     required(Document, '_id', Source),
     resource_limits:validate_document(Document),
+    ensure_incremental_capacity(KB, Source, Document),
     (   document_enabled(Document)
     ->  document_kind(Document, Kind),
         validate_kind(Kind, Document),
         retractall(kb_clause(KB, _, _, Source, _, _)),
+        retractall(kb_document_bytes(KB, Source, _)),
         assert_document_clause(Kind, KB, Document),
+        remember_document_bytes(KB, Source, Document),
         Outcome = Kind
     ;   retractall(kb_clause(KB, _, _, Source, _, _)),
+        retractall(kb_document_bytes(KB, Source, _)),
         Outcome = disabled
     ).
 
 remove_document(KB, Source) :-
-    retractall(kb_clause(KB, _, _, Source, _, _)).
+    retractall(kb_clause(KB, _, _, Source, _, _)),
+    retractall(kb_document_bytes(KB, Source, _)).
+
+ensure_incremental_capacity(KB, Source, Document) :-
+    loaded_usage_excluding(KB, Source, Count0, Bytes0),
+    (   document_enabled(Document)
+    ->  resource_limits:json_bytes(Document, DocumentBytes),
+        Count is Count0 + 1,
+        Bytes is Bytes0 + DocumentBytes
+    ;   Count = Count0,
+        Bytes = Bytes0
+    ),
+    config:max_kb_documents(MaxDocuments),
+    (   Count =< MaxDocuments
+    ->  true
+    ;   resource_limits:resource_limit(kb_document_count,
+                                        _{max_documents:MaxDocuments,
+                                          actual_documents:Count})
+    ),
+    config:max_kb_bytes(MaxBytes),
+    (   Bytes =< MaxBytes
+    ->  true
+    ;   resource_limits:resource_limit(kb_size,
+                                        _{max_bytes:MaxBytes,
+                                          actual_bytes:Bytes})
+    ).
+
+loaded_usage_excluding(KB, Source, Count, Bytes) :-
+    findall(DocumentBytes,
+            ( kb_document_bytes(KB, ExistingSource, DocumentBytes),
+              ExistingSource \== Source
+            ),
+            ByteValues),
+    length(ByteValues, Count),
+    sum_list(ByteValues, Bytes).
+
+remember_document_bytes(KB, Source, Document) :-
+    resource_limits:json_bytes(Document, Bytes),
+    assertz(kb_document_bytes(KB, Source, Bytes)).
 
 run_query(KB, Query, Options, Result) :-
     (   kb_loaded(KB)
@@ -166,6 +210,7 @@ run_bounded_query(QueryId,
                                            QueryId,
                                            Candidate),
                             Candidates),
+                  MaxInferenceSteps,
                   InferenceResult)),
           TimeoutError,
           handle_timeout_exception(TimeoutError, QueryId, TimeoutMs)),
@@ -297,10 +342,12 @@ load_documents([Document|Rest], KB, Facts0, Rules0, Skipped0, Facts, Rules, Skip
 load_document(fact, KB, Document, Facts0, Rules, Facts, Rules) :-
     fact_clause(Document, Head, Body, Source, Revision),
     assertz(kb_clause(KB, Head, Body, Source, Revision, fact)),
+    remember_document_bytes(KB, Source, Document),
     Facts is Facts0 + 1.
 load_document(rule, KB, Document, Facts, Rules0, Facts, Rules) :-
     rule_clause(Document, Head, Body, Source, Revision),
     assertz(kb_clause(KB, Head, Body, Source, Revision, rule)),
+    remember_document_bytes(KB, Source, Document),
     Rules is Rules0 + 1.
 
 assert_document_clause(fact, KB, Document) :-
@@ -781,4 +828,9 @@ predicate_start(0'_).
 predicate_continue(Code) :-
     code_type(Code, alnum),
     !.
-predicate_continue(0'_).
+predicate_continue(0' _).
+
+text_equal(Left, Right) :-
+    as_atom(Left, LeftAtom),
+    as_atom(Right, RightAtom),
+    LeftAtom == RightAtom.
