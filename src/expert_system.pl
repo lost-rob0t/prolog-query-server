@@ -10,6 +10,7 @@
 :- use_module(library(option)).
 :- use_module(library(error)).
 :- use_module(library(solution_sequences)).
+:- use_module(builtins).
 
 :- dynamic kb_clause/6.
 :- dynamic kb_loaded/1.
@@ -123,6 +124,7 @@ fact_clause(Document, Head, [], Source, Revision) :-
     optional(Document, args, [], Args),
     GoalDict = _{predicate:Predicate, args:Args},
     decode_goal(GoalDict, Head, [], Vars),
+    ensure_user_head(Head),
     (   Vars == [],
         ground(Head)
     ->  true
@@ -136,6 +138,7 @@ rule_clause(Document, Head, Body, Source, Revision) :-
     optional(Document, body, [], BodyDicts),
     must_be(list, BodyDicts),
     decode_goal(HeadDict, Head, [], Vars0),
+    ensure_user_head(Head),
     decode_body(BodyDicts, Body, Vars0, _Vars),
     document_source(Document, Source, Revision).
 
@@ -192,6 +195,12 @@ intern_variable(Name, Variable, Vars, Vars) :-
     Variable = Existing.
 intern_variable(Name, Variable, Vars0, [Name-Variable|Vars0]).
 
+ensure_user_head(goal(Predicate, _Args)) :-
+    (   builtins:builtin_name(Predicate)
+    ->  throw(error(permission_error(define, builtin_predicate, Predicate), _))
+    ;   true
+    ).
+
 query_solution(KB, Goal, Vars, MaxDepth, TraceEnabled, ExplanationMode, Solution) :-
     solve_goal(KB, Goal, 0, MaxDepth, Sources, FullProof),
     bindings_dict(Vars, Bindings),
@@ -202,15 +211,11 @@ query_solution(KB, Goal, Vars, MaxDepth, TraceEnabled, ExplanationMode, Solution
     ).
 
 solve_goal(_KB, Goal, _Depth, _MaxDepth, [], Proof) :-
-    Goal = goal(eq, [Left, Right]),
+    builtins:builtin_goal(Goal),
     !,
-    Left = Right,
-    builtin_proof(eq, Goal, Proof).
-solve_goal(_KB, Goal, _Depth, _MaxDepth, [], Proof) :-
-    Goal = goal(neq, [Left, Right]),
-    !,
-    dif(Left, Right),
-    builtin_proof(neq, Goal, Proof).
+    builtins:execute_builtin(Goal),
+    Goal = goal(Predicate, _Args),
+    builtin_proof(Predicate, Goal, Proof).
 solve_goal(KB, Goal, Depth, MaxDepth, [Source|Sources], Proof) :-
     Depth < MaxDepth,
     kb_clause(KB, Head0, Body0, Source, Revision, Kind),
