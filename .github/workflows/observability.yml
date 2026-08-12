@@ -21,7 +21,7 @@ jobs:
     container:
       image: swipl:10.0.2
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Run metrics and correlation-id PLUnit suite
         run: cd tests && swipl -q -g "load_files(['metrics_tests.pl'],[silent(true)]),(run_tests(metrics)->halt(0);halt(1))."
 
@@ -30,7 +30,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install distro SWI-Prolog
         run: |
           sudo apt-get update
@@ -47,7 +47,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Run privacy-safe Prometheus metrics suite
         run: bash tests/metrics.sh
 
