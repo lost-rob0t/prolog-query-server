@@ -1,0 +1,68 @@
+services:
+  couchdb-a:
+    build:
+      context: .
+      dockerfile: docker/couchdb/Dockerfile
+    environment:
+      COUCHDB_USER: admin
+      COUCHDB_PASSWORD: admin
+    ports:
+      - "5984:5984"
+    volumes:
+      - couchdb-a-data:/opt/couchdb/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:5984/_up"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  couchdb-b:
+    build:
+      context: .
+      dockerfile: docker/couchdb/Dockerfile
+    environment:
+      COUCHDB_USER: admin
+      COUCHDB_PASSWORD: admin
+    ports:
+      - "5985:5984"
+    volumes:
+      - couchdb-b-data:/opt/couchdb/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:5984/_up"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  prolog-a:
+    build: .
+    environment:
+      PORT: 8080
+      COUCHDB_URL: http://couchdb-a:5984
+      COUCHDB_DATABASE: prolog_kb
+      COUCHDB_USER: admin
+      COUCHDB_PASSWORD: admin
+      PQS_AUTH_MODE: off
+    ports:
+      - "8080:8080"
+    depends_on:
+      couchdb-a:
+        condition: service_healthy
+
+  prolog-b:
+    build: .
+    environment:
+      PORT: 8080
+      COUCHDB_URL: http://couchdb-b:5984
+      COUCHDB_DATABASE: prolog_kb
+      COUCHDB_USER: admin
+      COUCHDB_PASSWORD: admin
+      PQS_AUTH_MODE: off
+    ports:
+      - "8081:8080"
+    depends_on:
+      couchdb-b:
+        condition: service_healthy
+
+volumes:
+  couchdb-a-data:
+  couchdb-b-data:
