@@ -1,0 +1,39 @@
+name: replication
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: replication-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  replication-e2e:
+    name: couchdb-replication-failover-e2e
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate dual-site Compose topology
+        run: docker compose -f docker-compose.replication.yml config -q
+      - name: Shellcheck replication harness
+        run: shellcheck tests/replication_failover.sh
+      - name: Run replication, failover, failback, and conflict suite
+        run: bash tests/replication_failover.sh
+
+  replication-required:
+    name: replication-required
+    if: always()
+    needs: [replication-e2e]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require replication suite
+        env:
+          RESULT: ${{ needs.replication-e2e.result }}
+        run: test "$RESULT" = success
