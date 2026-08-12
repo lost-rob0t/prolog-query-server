@@ -1,7 +1,7 @@
 :- begin_tests(resource_limits).
 
 :- use_module('../src/expert_system').
-:- use_module('../src/resource_limits').
+:- use_module('../src/resource_limits', [effective_query_budget/2]).
 :- use_module('../src/query_jobs').
 
 fact(Id, Predicate, Args, Doc) :-
