@@ -10,32 +10,81 @@
 :- use_module(library(option)).
 :- use_module(library(error)).
 :- use_module(library(solution_sequences)).
+:- use_module(library(time)).
 :- use_module(builtins).
+:- use_module(config).
+:- use_module(resource_limits, []).
 
 :- dynamic kb_clause/6.
 :- dynamic kb_loaded/1.
+:- dynamic kb_document_bytes/3.
 
 replace_kb(KB, Documents, Stats) :-
+    resource_limits:validate_snapshot(Documents),
     retractall(kb_clause(KB, _, _, _, _, _)),
     retractall(kb_loaded(KB)),
+    retractall(kb_document_bytes(KB, _, _)),
     load_documents(Documents, KB, 0, 0, 0, Facts, Rules, Skipped),
     assertz(kb_loaded(KB)),
     Stats = _{facts:Facts, rules:Rules, skipped_disabled:Skipped}.
 
 upsert_document(KB, Document, Outcome) :-
     required(Document, '_id', Source),
+    resource_limits:validate_document(Document),
+    ensure_incremental_capacity(KB, Source, Document),
     (   document_enabled(Document)
     ->  document_kind(Document, Kind),
         validate_kind(Kind, Document),
         retractall(kb_clause(KB, _, _, Source, _, _)),
+        retractall(kb_document_bytes(KB, Source, _)),
         assert_document_clause(Kind, KB, Document),
+        remember_document_bytes(KB, Source, Document),
         Outcome = Kind
     ;   retractall(kb_clause(KB, _, _, Source, _, _)),
+        retractall(kb_document_bytes(KB, Source, _)),
         Outcome = disabled
     ).
 
 remove_document(KB, Source) :-
-    retractall(kb_clause(KB, _, _, Source, _, _)).
+    retractall(kb_clause(KB, _, _, Source, _, _)),
+    retractall(kb_document_bytes(KB, Source, _)).
+
+ensure_incremental_capacity(KB, Source, Document) :-
+    loaded_usage_excluding(KB, Source, Count0, Bytes0),
+    (   document_enabled(Document)
+    ->  resource_limits:json_bytes(Document, DocumentBytes),
+        Count is Count0 + 1,
+        Bytes is Bytes0 + DocumentBytes
+    ;   Count = Count0,
+        Bytes = Bytes0
+    ),
+    config:max_kb_documents(MaxDocuments),
+    (   Count =< MaxDocuments
+    ->  true
+    ;   resource_limits:resource_limit(kb_document_count,
+                                        _{max_documents:MaxDocuments,
+                                          actual_documents:Count})
+    ),
+    config:max_kb_bytes(MaxBytes),
+    (   Bytes =< MaxBytes
+    ->  true
+    ;   resource_limits:resource_limit(kb_size,
+                                        _{max_bytes:MaxBytes,
+                                          actual_bytes:Bytes})
+    ).
+
+loaded_usage_excluding(KB, Source, Count, Bytes) :-
+    findall(DocumentBytes,
+            ( kb_document_bytes(KB, ExistingSource, DocumentBytes),
+              ExistingSource \== Source
+            ),
+            ByteValues),
+    length(ByteValues, Count),
+    sum_list(ByteValues, Bytes).
+
+remember_document_bytes(KB, Source, Document) :-
+    resource_limits:json_bytes(Document, Bytes),
+    assertz(kb_document_bytes(KB, Source, Bytes)).
 
 run_query(KB, Query, Options, Result) :-
     (   kb_loaded(KB)
@@ -44,25 +93,212 @@ run_query(KB, Query, Options, Result) :-
     ),
     decode_goal(Query, Goal, [], VarsReversed),
     reverse(VarsReversed, Vars),
-    option(max_depth(MaxDepth), Options, 32),
-    option(max_solutions(MaxSolutions), Options, 100),
+    query_options(Options,
+                  QueryId,
+                  MaxDepth,
+                  MaxSolutions,
+                  TimeoutMs,
+                  MaxInferenceSteps,
+                  MaxProofNodes,
+                  MaxProofBytes,
+                  Trace,
+                  ExplanationMode),
+    ProbeSolutions is MaxSolutions + 1,
+    setup_call_cleanup(
+        nb_setval(pqs_depth_hit, false),
+        run_bounded_query(QueryId,
+                          TimeoutMs,
+                          MaxInferenceSteps,
+                          ProbeSolutions,
+                          KB,
+                          Goal,
+                          Vars,
+                          MaxDepth,
+                          Trace,
+                          ExplanationMode,
+                          MaxProofNodes,
+                          MaxProofBytes,
+                          Candidates,
+                          DepthHit),
+        nb_delete(pqs_depth_hit)),
+    finalize_candidates(Candidates,
+                        MaxSolutions,
+                        QueryId,
+                        MaxProofNodes,
+                        MaxProofBytes,
+                        Solutions,
+                        SolutionLimitHit,
+                        ProofNodes,
+                        ProofBytes),
+    length(Solutions, Count),
+    Budget = _{timeout_ms:TimeoutMs,
+               max_depth:MaxDepth,
+               max_solutions:MaxSolutions,
+               max_inference_steps:MaxInferenceSteps,
+               max_proof_nodes:MaxProofNodes,
+               max_proof_bytes:MaxProofBytes},
+    Result = _{kb:KB,
+               query_id:QueryId,
+               count:Count,
+               solutions:Solutions,
+               budget:Budget,
+               limit_hits:_{max_depth:DepthHit,
+                            max_solutions:SolutionLimitHit},
+               proof_usage:_{nodes:ProofNodes, bytes:ProofBytes}}.
+
+query_options(Options,
+              QueryId,
+              MaxDepth,
+              MaxSolutions,
+              TimeoutMs,
+              MaxInferenceSteps,
+              MaxProofNodes,
+              MaxProofBytes,
+              Trace,
+              ExplanationMode) :-
+    config:max_query_depth(DefaultDepth),
+    config:max_query_solutions(DefaultSolutions),
+    config:query_timeout_ms(DefaultTimeoutMs),
+    config:max_inference_steps(DefaultInferenceSteps),
+    config:max_proof_nodes(DefaultProofNodes),
+    config:max_proof_bytes(DefaultProofBytes),
+    option(query_id(QueryId), Options, null),
+    option(max_depth(MaxDepth), Options, DefaultDepth),
+    option(max_solutions(MaxSolutions), Options, DefaultSolutions),
+    option(timeout_ms(TimeoutMs), Options, DefaultTimeoutMs),
+    option(max_inference_steps(MaxInferenceSteps), Options, DefaultInferenceSteps),
+    option(max_proof_nodes(MaxProofNodes), Options, DefaultProofNodes),
+    option(max_proof_bytes(MaxProofBytes), Options, DefaultProofBytes),
     option(trace(Trace), Options, false),
     option(explanation_mode(ExplanationMode0), Options, full),
     positive_integer(max_depth, MaxDepth),
     positive_integer(max_solutions, MaxSolutions),
-    normalize_explanation_mode(ExplanationMode0, ExplanationMode),
-    findnsols(MaxSolutions,
-              Solution,
-              query_solution(KB,
-                             Goal,
-                             Vars,
-                             MaxDepth,
-                             Trace,
-                             ExplanationMode,
-                             Solution),
-              Solutions),
-    length(Solutions, Count),
-    Result = _{kb:KB, count:Count, solutions:Solutions}.
+    positive_integer(timeout_ms, TimeoutMs),
+    positive_integer(max_inference_steps, MaxInferenceSteps),
+    positive_integer(max_proof_nodes, MaxProofNodes),
+    positive_integer(max_proof_bytes, MaxProofBytes),
+    normalize_explanation_mode(ExplanationMode0, ExplanationMode).
+
+run_bounded_query(QueryId,
+                  TimeoutMs,
+                  MaxInferenceSteps,
+                  ProbeSolutions,
+                  KB,
+                  Goal,
+                  Vars,
+                  MaxDepth,
+                  Trace,
+                  ExplanationMode,
+                  MaxProofNodes,
+                  MaxProofBytes,
+                  Candidates,
+                  DepthHit) :-
+    TimeoutSeconds is TimeoutMs / 1000.0,
+    catch(call_with_time_limit(
+              TimeoutSeconds,
+              call_with_inference_limit(
+                  findnsols(ProbeSolutions,
+                            Candidate,
+                            query_solution(KB,
+                                           Goal,
+                                           Vars,
+                                           MaxDepth,
+                                           Trace,
+                                           ExplanationMode,
+                                           MaxProofNodes,
+                                           MaxProofBytes,
+                                           QueryId,
+                                           Candidate),
+                            Candidates),
+                  MaxInferenceSteps,
+                  InferenceResult)),
+          TimeoutError,
+          handle_timeout_exception(TimeoutError, QueryId, TimeoutMs)),
+    (   InferenceResult == inference_limit_exceeded
+    ->  throw(error(pqs_query_resource(inference_budget,
+                                       QueryId,
+                                       _{max_inference_steps:MaxInferenceSteps}),
+                      _))
+    ;   true
+    ),
+    nb_getval(pqs_depth_hit, DepthHit).
+
+handle_timeout_exception(time_limit_exceeded, QueryId, TimeoutMs) :-
+    !,
+    throw(error(pqs_query_resource(query_timeout,
+                                   QueryId,
+                                   _{timeout_ms:TimeoutMs}),
+                _)).
+handle_timeout_exception(error(time_limit_exceeded, _), QueryId, TimeoutMs) :-
+    !,
+    throw(error(pqs_query_resource(query_timeout,
+                                   QueryId,
+                                   _{timeout_ms:TimeoutMs}),
+                _)).
+handle_timeout_exception(Error, _QueryId, _TimeoutMs) :-
+    throw(Error).
+
+finalize_candidates(Candidates,
+                    MaxSolutions,
+                    QueryId,
+                    MaxProofNodes,
+                    MaxProofBytes,
+                    Solutions,
+                    SolutionLimitHit,
+                    ProofNodes,
+                    ProofBytes) :-
+    length(Candidates, CandidateCount),
+    (   CandidateCount > MaxSolutions
+    ->  SolutionLimitHit = true
+    ;   SolutionLimitHit = false
+    ),
+    take_candidates(MaxSolutions, Candidates, Returned),
+    candidate_solutions(Returned, Solutions),
+    candidate_proof_totals(Returned, 0, 0, ProofNodes, ProofBytes),
+    ensure_proof_totals(QueryId,
+                        MaxProofNodes,
+                        MaxProofBytes,
+                        ProofNodes,
+                        ProofBytes).
+
+take_candidates(0, _Candidates, []) :- !.
+take_candidates(_N, [], []) :- !.
+take_candidates(N, [Candidate|Rest], [Candidate|Taken]) :-
+    N > 0,
+    Next is N - 1,
+    take_candidates(Next, Rest, Taken).
+
+candidate_solutions([], []).
+candidate_solutions([candidate(Solution, _, _)|Rest], [Solution|Solutions]) :-
+    candidate_solutions(Rest, Solutions).
+
+candidate_proof_totals([], Nodes, Bytes, Nodes, Bytes).
+candidate_proof_totals([candidate(_, CandidateNodes, CandidateBytes)|Rest],
+                       Nodes0,
+                       Bytes0,
+                       Nodes,
+                       Bytes) :-
+    Nodes1 is Nodes0 + CandidateNodes,
+    Bytes1 is Bytes0 + CandidateBytes,
+    candidate_proof_totals(Rest, Nodes1, Bytes1, Nodes, Bytes).
+
+ensure_proof_totals(QueryId, MaxProofNodes, _MaxProofBytes, Nodes, _Bytes) :-
+    Nodes > MaxProofNodes,
+    !,
+    throw(error(pqs_query_resource(proof_limit,
+                                   QueryId,
+                                   _{max_proof_nodes:MaxProofNodes,
+                                     actual_proof_nodes:Nodes}),
+                _)).
+ensure_proof_totals(QueryId, _MaxProofNodes, MaxProofBytes, _Nodes, Bytes) :-
+    Bytes > MaxProofBytes,
+    !,
+    throw(error(pqs_query_resource(proof_limit,
+                                   QueryId,
+                                   _{max_proof_bytes:MaxProofBytes,
+                                     actual_proof_bytes:Bytes}),
+                _)).
+ensure_proof_totals(_QueryId, _MaxProofNodes, _MaxProofBytes, _Nodes, _Bytes).
 
 knowledge_base_loaded(KB) :-
     kb_loaded(KB).
@@ -82,6 +318,7 @@ normalize_explanation_mode(Value, _) :-
     throw(error(domain_error(explanation_mode, Value), _)).
 
 validate_document(Document) :-
+    resource_limits:validate_document(Document),
     document_kind(Document, Kind),
     validate_kind(Kind, Document).
 
@@ -105,10 +342,12 @@ load_documents([Document|Rest], KB, Facts0, Rules0, Skipped0, Facts, Rules, Skip
 load_document(fact, KB, Document, Facts0, Rules, Facts, Rules) :-
     fact_clause(Document, Head, Body, Source, Revision),
     assertz(kb_clause(KB, Head, Body, Source, Revision, fact)),
+    remember_document_bytes(KB, Source, Document),
     Facts is Facts0 + 1.
 load_document(rule, KB, Document, Facts, Rules0, Facts, Rules) :-
     rule_clause(Document, Head, Body, Source, Revision),
     assertz(kb_clause(KB, Head, Body, Source, Revision, rule)),
+    remember_document_bytes(KB, Source, Document),
     Rules is Rules0 + 1.
 
 assert_document_clause(fact, KB, Document) :-
@@ -201,28 +440,217 @@ ensure_user_head(goal(Predicate, _Args)) :-
     ;   true
     ).
 
-query_solution(KB, Goal, Vars, MaxDepth, TraceEnabled, ExplanationMode, Solution) :-
-    solve_goal(KB, Goal, 0, MaxDepth, Sources, FullProof),
+query_solution(KB,
+               Goal,
+               Vars,
+               MaxDepth,
+               TraceEnabled,
+               ExplanationMode,
+               MaxProofNodes,
+               MaxProofBytes,
+               QueryId,
+               candidate(Solution, ProofNodes, ProofBytes)) :-
+    solve_goal(KB,
+               Goal,
+               0,
+               MaxDepth,
+               TraceEnabled,
+               MaxProofNodes,
+               QueryId,
+               0,
+               ProofNodes,
+               Sources,
+               FullProof),
     bindings_dict(Vars, Bindings),
     (   TraceEnabled == true
     ->  format_proof(ExplanationMode, FullProof, Proof),
+        resource_limits:json_bytes(Proof, ProofBytes),
+        ensure_single_proof(QueryId,
+                            MaxProofNodes,
+                            MaxProofBytes,
+                            ProofNodes,
+                            ProofBytes),
         Solution = _{bindings:Bindings, sources:Sources, proof:Proof}
-    ;   Solution = _{bindings:Bindings}
+    ;   ProofBytes = 0,
+        Solution = _{bindings:Bindings}
     ).
 
-solve_goal(_KB, Goal, _Depth, _MaxDepth, [], Proof) :-
+ensure_single_proof(QueryId, MaxProofNodes, _MaxProofBytes, Nodes, _Bytes) :-
+    Nodes > MaxProofNodes,
+    !,
+    throw(error(pqs_query_resource(proof_limit,
+                                   QueryId,
+                                   _{max_proof_nodes:MaxProofNodes,
+                                     actual_proof_nodes:Nodes}),
+                _)).
+ensure_single_proof(QueryId, _MaxProofNodes, MaxProofBytes, _Nodes, Bytes) :-
+    Bytes > MaxProofBytes,
+    !,
+    throw(error(pqs_query_resource(proof_limit,
+                                   QueryId,
+                                   _{max_proof_bytes:MaxProofBytes,
+                                     actual_proof_bytes:Bytes}),
+                _)).
+ensure_single_proof(_QueryId, _MaxProofNodes, _MaxProofBytes, _Nodes, _Bytes).
+
+solve_goal(_KB,
+           Goal,
+           _Depth,
+           _MaxDepth,
+           TraceEnabled,
+           MaxProofNodes,
+           QueryId,
+           Nodes0,
+           Nodes,
+           [],
+           Proof) :-
     builtins:builtin_goal(Goal),
     !,
     builtins:execute_builtin(Goal),
     Goal = goal(Predicate, _Args),
-    builtin_proof(Predicate, Goal, Proof).
-solve_goal(KB, Goal, Depth, MaxDepth, [Source|Sources], Proof) :-
-    Depth < MaxDepth,
+    proof_node(TraceEnabled, MaxProofNodes, QueryId, Nodes0, Nodes),
+    (   TraceEnabled == true
+    ->  builtin_proof(Predicate, Goal, Proof)
+    ;   Proof = none
+    ).
+solve_goal(KB,
+           Goal,
+           Depth,
+           MaxDepth,
+           TraceEnabled,
+           MaxProofNodes,
+           QueryId,
+           Nodes0,
+           Nodes,
+           [Source|Sources],
+           Proof) :-
     kb_clause(KB, Head0, Body0, Source, Revision, Kind),
     copy_term((Head0, Body0), (Head, Body)),
     Goal = Head,
-    NextDepth is Depth + 1,
-    solve_body(KB, Body, NextDepth, MaxDepth, Sources, Children),
+    (   Depth < MaxDepth
+    ->  NextDepth is Depth + 1,
+        solve_body(KB,
+                   Body,
+                   NextDepth,
+                   MaxDepth,
+                   TraceEnabled,
+                   MaxProofNodes,
+                   QueryId,
+                   Nodes0,
+                   BodyNodes,
+                   Sources,
+                   Children),
+        proof_node(TraceEnabled, MaxProofNodes, QueryId, BodyNodes, Nodes),
+        make_user_proof(TraceEnabled,
+                        Goal,
+                        Source,
+                        Revision,
+                        Kind,
+                        Children,
+                        Proof)
+    ;   mark_depth_hit,
+        fail
+    ).
+
+solve_body(_KB,
+           [],
+           _Depth,
+           _MaxDepth,
+           _TraceEnabled,
+           _MaxProofNodes,
+           _QueryId,
+           Nodes,
+           Nodes,
+           [],
+           []).
+solve_body(KB,
+           [not(Goal)|Rest],
+           Depth,
+           MaxDepth,
+           TraceEnabled,
+           MaxProofNodes,
+           QueryId,
+           Nodes0,
+           Nodes,
+           Sources,
+           [NegationProof|Proofs]) :-
+    !,
+    \+ solve_goal(KB,
+                  Goal,
+                  Depth,
+                  MaxDepth,
+                  false,
+                  MaxProofNodes,
+                  QueryId,
+                  Nodes0,
+                  _IgnoredNodes,
+                  _NegatedSources,
+                  _NegatedProof),
+    proof_node(TraceEnabled, MaxProofNodes, QueryId, Nodes0, Nodes1),
+    make_negation_proof(TraceEnabled, Goal, NegationProof),
+    solve_body(KB,
+               Rest,
+               Depth,
+               MaxDepth,
+               TraceEnabled,
+               MaxProofNodes,
+               QueryId,
+               Nodes1,
+               Nodes,
+               Sources,
+               Proofs).
+solve_body(KB,
+           [Goal|Rest],
+           Depth,
+           MaxDepth,
+           TraceEnabled,
+           MaxProofNodes,
+           QueryId,
+           Nodes0,
+           Nodes,
+           Sources,
+           [HeadProof|TailProofs]) :-
+    solve_goal(KB,
+               Goal,
+               Depth,
+               MaxDepth,
+               TraceEnabled,
+               MaxProofNodes,
+               QueryId,
+               Nodes0,
+               Nodes1,
+               HeadSources,
+               HeadProof),
+    solve_body(KB,
+               Rest,
+               Depth,
+               MaxDepth,
+               TraceEnabled,
+               MaxProofNodes,
+               QueryId,
+               Nodes1,
+               Nodes,
+               TailSources,
+               TailProofs),
+    append(HeadSources, TailSources, Sources).
+
+proof_node(false, _MaxProofNodes, _QueryId, Nodes, Nodes) :- !.
+proof_node(true, MaxProofNodes, QueryId, Nodes0, Nodes) :-
+    Nodes is Nodes0 + 1,
+    (   Nodes =< MaxProofNodes
+    ->  true
+    ;   throw(error(pqs_query_resource(proof_limit,
+                                       QueryId,
+                                       _{max_proof_nodes:MaxProofNodes,
+                                         actual_proof_nodes:Nodes}),
+                      _))
+    ).
+
+mark_depth_hit :-
+    nb_setval(pqs_depth_hit, true).
+
+make_user_proof(false, _Goal, _Source, _Revision, _Kind, _Children, none) :- !.
+make_user_proof(true, Goal, Source, Revision, Kind, Children, Proof) :-
     goal_json(Goal, GoalJSON),
     source_json(Source, Revision, SourceJSON),
     kind_json(Kind, KindJSON),
@@ -231,30 +659,13 @@ solve_goal(KB, Goal, Depth, MaxDepth, [Source|Sources], Proof) :-
               source:SourceJSON,
               children:Children}.
 
-solve_body(_KB, [], _Depth, _MaxDepth, [], []).
-solve_body(KB,
-           [not(Goal)|Rest],
-           Depth,
-           MaxDepth,
-           Sources,
-           [NegationProof|Proofs]) :-
-    !,
-    \+ solve_goal(KB, Goal, Depth, MaxDepth, _NegatedSources, _NegatedProof),
+make_negation_proof(false, _Goal, none) :- !.
+make_negation_proof(true, Goal, Proof) :-
     goal_json(Goal, GoalJSON),
-    NegationProof = _{kind:"negation",
-                      goal:GoalJSON,
-                      decision:"not_provable",
-                      children:[]},
-    solve_body(KB, Rest, Depth, MaxDepth, Sources, Proofs).
-solve_body(KB,
-           [Goal|Rest],
-           Depth,
-           MaxDepth,
-           Sources,
-           [HeadProof|TailProofs]) :-
-    solve_goal(KB, Goal, Depth, MaxDepth, HeadSources, HeadProof),
-    solve_body(KB, Rest, Depth, MaxDepth, TailSources, TailProofs),
-    append(HeadSources, TailSources, Sources).
+    Proof = _{kind:"negation",
+              goal:GoalJSON,
+              decision:"not_provable",
+              children:[]}.
 
 builtin_proof(Predicate, Goal, Proof) :-
     goal_json(Goal, GoalJSON),

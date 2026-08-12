@@ -27,7 +27,7 @@ jobs:
       - name: Load every Prolog module
         run: >-
           swipl -q --on-error=status -g
-          "load_files(['src/config.pl','src/auth.pl','src/couchdb.pl','src/builtins.pl','src/kb_analysis.pl','src/analysis_service.pl','src/expert_system.pl','src/kb_service.pl','src/query_server_protocol.pl','src/api.pl','server.pl'],[silent(true)]),halt."
+          "use_module('src/config.pl',[]),use_module('src/api_errors.pl',[]),use_module('src/resource_limits.pl',[]),use_module('src/auth.pl',[]),use_module('src/couchdb.pl',[]),use_module('src/builtins.pl',[]),use_module('src/kb_analysis.pl',[]),use_module('src/analysis_service.pl',[]),use_module('src/expert_system.pl',[]),use_module('src/kb_service.pl',[]),use_module('src/metrics.pl',[]),use_module('src/observability.pl',[]),use_module('src/query_jobs.pl',[]),use_module('src/query_server_protocol.pl',[]),use_module('src/api.pl',[]),load_files('server.pl',[silent(true)]),halt."
       - name: Shellcheck test scripts
         run: shellcheck tests/*.sh
       - name: Validate Docker Compose
@@ -149,6 +149,17 @@ jobs:
       - name: Run static analysis and strict activation suite
         run: bash tests/kb_analysis.sh
 
+  resource-limits:
+    name: query-resource-limits-e2e
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - name: Run query, cancellation, request, KB, and proof resource-limit suite
+        run: bash tests/resource_limits.sh
+      - name: Prove cancellation rollback keeps the loaded KB atomic
+        run: bash tests/cancellation_atomicity.sh
+
   required:
     name: required
     if: always()
@@ -165,6 +176,7 @@ jobs:
       - builtins
       - auth
       - analysis
+      - resource-limits
     runs-on: ubuntu-latest
     steps:
       - name: Require every CI lane
@@ -172,4 +184,4 @@ jobs:
           RESULTS: ${{ join(needs.*.result, ' ') }}
         run: |
           echo "results: $RESULTS"
-          test "$RESULTS" = "success success success success success success success success success success success success"
+          test "$RESULTS" = "success success success success success success success success success success success success success"

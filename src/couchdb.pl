@@ -18,6 +18,7 @@
 :- use_module(library(http/http_json)).
 :- use_module(library(uri)).
 :- use_module(config).
+:- use_module(resource_limits, []).
 
 ensure_storage :-
     ensure_database,
@@ -89,12 +90,13 @@ get_document(Id, Document) :-
 
 find_kb_documents(KB, Documents) :-
     ensure_storage,
-    find_pages(KB, 500, null, [], Reversed),
+    find_pages(KB, all, 500, null, [], 0, 0, Reversed),
     reverse(Reversed, Documents).
 
 find_kb_documents(KB, Release, Documents) :-
-    find_kb_documents(KB, AllDocuments),
-    include(document_in_release(Release), AllDocuments, Documents).
+    ensure_storage,
+    find_pages(KB, release(Release), 500, null, [], 0, 0, Reversed),
+    reverse(Reversed, Documents).
 
 get_kb_manifest(KB, Manifest) :-
     manifest_id(KB, Id),
@@ -180,16 +182,51 @@ document_release(Document, Release) :-
     ;   Release = "legacy"
     ).
 
-find_pages(KB, Limit, Bookmark, Acc0, Acc) :-
+find_pages(KB, Scope, Limit, Bookmark, Acc0, Count0, Bytes0, Acc) :-
     find_page(KB, Limit, Bookmark, Page, NextBookmark),
-    reverse(Page, PageReversed),
-    append(PageReversed, Acc0, Acc1),
-    length(Page, Count),
-    (   Count < Limit
+    include(scope_document(Scope), Page, ScopedPage),
+    accumulate_documents(ScopedPage, Acc0, Count0, Bytes0, Acc1, Count1, Bytes1),
+    length(Page, PageCount),
+    (   PageCount < Limit
     ->  Acc = Acc1
     ;   NextBookmark == null
     ->  Acc = Acc1
-    ;   find_pages(KB, Limit, NextBookmark, Acc1, Acc)
+    ;   find_pages(KB, Scope, Limit, NextBookmark, Acc1, Count1, Bytes1, Acc)
+    ).
+
+scope_document(all, _Document).
+scope_document(release(Release), Document) :-
+    document_in_release(Release, Document).
+
+accumulate_documents([], Acc, Count, Bytes, Acc, Count, Bytes).
+accumulate_documents([Document|Rest], Acc0, Count0, Bytes0, Acc, Count, Bytes) :-
+    resource_limits:validate_document(Document),
+    resource_limits:json_bytes(Document, DocumentBytes),
+    Count1 is Count0 + 1,
+    Bytes1 is Bytes0 + DocumentBytes,
+    enforce_snapshot_usage(Count1, Bytes1),
+    accumulate_documents(Rest,
+                         [Document|Acc0],
+                         Count1,
+                         Bytes1,
+                         Acc,
+                         Count,
+                         Bytes).
+
+enforce_snapshot_usage(Count, Bytes) :-
+    config:max_kb_documents(MaxDocuments),
+    (   Count =< MaxDocuments
+    ->  true
+    ;   resource_limits:resource_limit(kb_document_count,
+                                        _{max_documents:MaxDocuments,
+                                          actual_documents:Count})
+    ),
+    config:max_kb_bytes(MaxBytes),
+    (   Bytes =< MaxBytes
+    ->  true
+    ;   resource_limits:resource_limit(kb_size,
+                                        _{max_bytes:MaxBytes,
+                                          actual_bytes:Bytes})
     ).
 
 find_page(KB, Limit, Bookmark, Documents, NextBookmark) :-
