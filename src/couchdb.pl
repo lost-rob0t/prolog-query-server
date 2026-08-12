@@ -56,10 +56,10 @@ delete_document(Id, Revision, Reply) :-
     document_url(Id, BaseURL),
     uri_encoded(query_value, Revision, EncodedRevision),
     format(atom(URL), '~w?rev=~w', [BaseURL, EncodedRevision]),
+    request_options(Options),
     http_delete(URL,
                 Reply,
                 [json_object(dict), status_code(Status)|Options]),
-    request_options(Options),
     require_status(Status, [200, 202], Reply).
 
 bulk_documents(Documents, Reply) :-
