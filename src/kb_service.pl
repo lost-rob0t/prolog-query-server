@@ -169,6 +169,8 @@ ensure_query_snapshot(RuntimeKB, KB, Release, Options, Stats) :-
     ;   expert_system:knowledge_base_loaded(RuntimeKB)
     ->  Stats = _{reloaded:false,
                   synced:false,
+                  full_reload:false,
+                  sync_mode:"none",
                   release:Release}
     ;   refresh_release_unlocked(KB, Release, Stats)
     ).
@@ -200,8 +202,9 @@ sync_from_changes_unlocked(RuntimeKB, KB, Release, Since, Stats) :-
                   Ignored),
     set_kb_sequence(RuntimeKB, LastSequence),
     length(Changes, Seen),
-    Stats = _{reloaded:false,
+    Stats = _{reloaded:true,
               synced:true,
+              full_reload:false,
               sync_mode:"changes",
               release:Release,
               since:Since,
@@ -275,6 +278,7 @@ refresh_release_unlocked(KB, Release, Stats) :-
     length(Documents, DocumentCount),
     put_dict(_{reloaded:true,
                synced:false,
+               full_reload:true,
                sync_mode:"full",
                release:Release,
                last_seq:Sequence,
