@@ -113,6 +113,15 @@ jobs:
       - name: Run revision-safe knowledge CRUD suite
         run: bash tests/knowledge_crud.sh
 
+  proof-tree:
+    name: couchdb-proof-tree-e2e
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run persisted structured proof tree suite
+        run: bash tests/proof_tree.sh
+
   required:
     name: required
     if: always()
@@ -125,6 +134,7 @@ jobs:
       - integration
       - changes-sync
       - knowledge-crud
+      - proof-tree
     runs-on: ubuntu-latest
     steps:
       - name: Require every CI lane
@@ -132,4 +142,4 @@ jobs:
           RESULTS: ${{ join(needs.*.result, ' ') }}
         run: |
           echo "results: $RESULTS"
-          test "$RESULTS" = "success success success success success success success success"
+          test "$RESULTS" = "success success success success success success success success success"
