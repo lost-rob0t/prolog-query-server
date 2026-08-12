@@ -828,7 +828,7 @@ predicate_start(0'_).
 predicate_continue(Code) :-
     code_type(Code, alnum),
     !.
-predicate_continue(0' _).
+predicate_continue(0'_).
 
 text_equal(Left, Right) :-
     as_atom(Left, LeftAtom),
