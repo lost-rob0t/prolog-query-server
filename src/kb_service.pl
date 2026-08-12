@@ -4,8 +4,13 @@
             query_kb/4,
             knowledge_documents/2,
             knowledge_documents/3,
+            knowledge_document/2,
             save_fact/2,
             save_rule/2,
+            put_knowledge_document/2,
+            patch_knowledge_document/2,
+            delete_knowledge_document/3,
+            bulk_knowledge_documents/2,
             release_status/2,
             activate_release/2
           ]).
@@ -57,6 +62,15 @@ knowledge_documents(KB, Release0, Documents) :-
     normalize_release_value(Release0, Release),
     couchdb:find_kb_documents(KB, Release, Documents).
 
+knowledge_document(Id0, Document) :-
+    normalize_document_id(Id0, Id),
+    couchdb:get_document(Id, Found),
+    (   Found == none
+    ->  throw(error(existence_error(knowledge_document, Id), _))
+    ;   ensure_knowledge_type(Found),
+        Document = Found
+    ).
+
 save_fact(Input, Saved) :-
     normalize_kb(Input, KB),
     kb_mutex(KB, Mutex),
@@ -66,6 +80,62 @@ save_rule(Input, Saved) :-
     normalize_kb(Input, KB),
     kb_mutex(KB, Mutex),
     with_mutex(Mutex, save_rule_unlocked(Input, KB, Saved)).
+
+put_knowledge_document(Input, Saved) :-
+    required(Input, '_id', Id0),
+    normalize_document_id(Id0, Id),
+    required_revision(Input, Revision),
+    knowledge_document(Id, Existing),
+    document_identity(Existing, Type, KB, Release),
+    kb_mutex(KB, Mutex),
+    with_mutex(Mutex,
+               ( ensure_release_writable(KB, Release),
+                 require_identity(Input, Type, KB, Release),
+                 put_dict(_{'_id':Id, '_rev':Revision}, Input, Document),
+                 expert_system:validate_document(Document),
+                 couchdb:put_document(Id, Document, CouchReply),
+                 Saved = _{document:Document, couchdb:CouchReply}
+               )).
+
+patch_knowledge_document(Input, Saved) :-
+    required(Input, '_id', Id0),
+    normalize_document_id(Id0, Id),
+    required_revision(Input, Revision),
+    knowledge_document(Id, Existing),
+    document_identity(Existing, Type, KB, Release),
+    kb_mutex(KB, Mutex),
+    with_mutex(Mutex,
+               ( ensure_release_writable(KB, Release),
+                 require_optional_identity(Input, Type, KB, Release),
+                 strip_patch_control(Input, Patch),
+                 put_dict(Patch, Existing, Patched0),
+                 put_dict(_{'_id':Id, '_rev':Revision,
+                            type:Type, kb:KB, release:Release},
+                          Patched0,
+                          Document),
+                 expert_system:validate_document(Document),
+                 couchdb:put_document(Id, Document, CouchReply),
+                 Saved = _{document:Document, couchdb:CouchReply}
+               )).
+
+delete_knowledge_document(Id0, Revision0, Saved) :-
+    normalize_document_id(Id0, Id),
+    normalize_revision(Revision0, Revision),
+    knowledge_document(Id, Existing),
+    document_identity(Existing, _Type, KB, Release),
+    kb_mutex(KB, Mutex),
+    with_mutex(Mutex,
+               ( ensure_release_writable(KB, Release),
+                 couchdb:delete_document(Id, Revision, CouchReply),
+                 Saved = _{id:Id, revision:Revision, couchdb:CouchReply}
+               )).
+
+bulk_knowledge_documents(Input, Saved) :-
+    required(Input, documents, Documents0),
+    must_be(list, Documents0),
+    maplist(normalize_bulk_document, Documents0, Documents),
+    couchdb:bulk_documents(Documents, Results),
+    Saved = _{documents:Documents, results:Results}.
 
 release_status(KB, Status) :-
     active_release(KB, Release, Manifest),
@@ -122,6 +192,91 @@ save_rule_unlocked(Input, KB, Saved) :-
     expert_system:validate_document(Document),
     couchdb:save_document(Document, CouchReply),
     Saved = _{document:Document, couchdb:CouchReply}.
+
+normalize_bulk_document(Document0, Document) :-
+    must_be(dict, Document0),
+    ensure_knowledge_type(Document0),
+    normalize_kb(Document0, KB),
+    normalize_bulk_release(Document0, KB, Release),
+    normalize_enabled(Document0, Enabled),
+    put_dict(_{kb:KB, release:Release, enabled:Enabled}, Document0, Candidate0),
+    (   get_dict('_rev', Candidate0, Revision0)
+    ->  normalize_revision(Revision0, Revision),
+        required(Candidate0, '_id', Id0),
+        normalize_document_id(Id0, Id),
+        knowledge_document(Id, Existing),
+        document_identity(Existing, Type, ExistingKB, ExistingRelease),
+        ensure_release_writable(ExistingKB, ExistingRelease),
+        require_identity(Candidate0, Type, ExistingKB, ExistingRelease),
+        put_dict(_{'_id':Id, '_rev':Revision}, Candidate0, Candidate)
+    ;   ensure_release_writable(KB, Release),
+        Candidate = Candidate0
+    ),
+    expert_system:validate_document(Candidate),
+    Document = Candidate.
+
+normalize_bulk_release(Document, KB, Release) :-
+    (   get_dict(release, Document, Release0)
+    ->  normalize_release_value(Release0, Release)
+    ;   active_release(KB, ActiveRelease, _Manifest),
+        (   ActiveRelease == "legacy"
+        ->  Release = "legacy"
+        ;   throw(error(existence_error(key, release), _))
+        )
+    ).
+
+require_identity(Document, Type, KB, Release) :-
+    required(Document, type, Type0),
+    required(Document, kb, KB0),
+    required(Document, release, Release0),
+    identity_equal(type, Type0, Type),
+    identity_equal(kb, KB0, KB),
+    identity_equal(release, Release0, Release).
+
+require_optional_identity(Document, Type, KB, Release) :-
+    optional_identity(Document, type, Type),
+    optional_identity(Document, kb, KB),
+    optional_identity(Document, release, Release).
+
+optional_identity(Document, Key, Expected) :-
+    (   get_dict(Key, Document, Value)
+    ->  identity_equal(Key, Value, Expected)
+    ;   true
+    ).
+
+identity_equal(_Key, Value, Expected) :-
+    Value == Expected,
+    !.
+identity_equal(Key, Value, Expected) :-
+    throw(error(permission_error(modify,
+                                 knowledge_document_identity(Key, Expected),
+                                 Value),
+                _)).
+
+strip_patch_control(Input, Patch) :-
+    remove_dict_key('_id', Input, A),
+    remove_dict_key('_rev', A, B),
+    remove_dict_key(type, B, C),
+    remove_dict_key(kb, C, D),
+    remove_dict_key(release, D, Patch).
+
+remove_dict_key(Key, Dict0, Dict) :-
+    (   del_dict(Key, Dict0, _Value, Dict1)
+    ->  Dict = Dict1
+    ;   Dict = Dict0
+    ).
+
+document_identity(Document, Type, KB, Release) :-
+    required(Document, type, Type),
+    required(Document, kb, KB),
+    document_release(Document, Release).
+
+ensure_knowledge_type(Document) :-
+    required(Document, type, Type),
+    (   memberchk(Type, ["prolog_fact", "prolog_rule"])
+    ->  true
+    ;   throw(error(domain_error(prolog_document_type, Type), _))
+    ).
 
 normalize_write_release(Input, KB, Release) :-
     (   get_dict(release, Input, Release0)
@@ -265,7 +420,7 @@ document_matches_runtime(Document, KB, Release) :-
 
 document_release(Document, Release) :-
     (   get_dict(release, Document, Release0)
-    ->  Release = Release0
+    ->  normalize_release_value(Release0, Release)
     ;   Release = "legacy"
     ).
 
@@ -310,6 +465,26 @@ normalize_release_value(Value, Release) :-
     ;   throw(error(domain_error(knowledge_release, Value), _))
     ).
 
+normalize_document_id(Value, Id) :-
+    must_be(string, Value),
+    string_length(Value, Length),
+    (   Length > 0
+    ->  Id = Value
+    ;   throw(error(domain_error(document_id, Value), _))
+    ).
+
+normalize_revision(Value, Revision) :-
+    must_be(string, Value),
+    string_length(Value, Length),
+    (   Length > 0
+    ->  Revision = Value
+    ;   throw(error(domain_error(document_revision, Value), _))
+    ).
+
+required_revision(Input, Revision) :-
+    required(Input, '_rev', Revision0),
+    normalize_revision(Revision0, Revision).
+
 normalize_enabled(Input, Enabled) :-
     (   get_dict(enabled, Input, Enabled0)
     ->  Enabled = Enabled0
@@ -322,9 +497,7 @@ normalize_enabled(Input, Enabled) :-
 
 validate_optional_revision(null) :- !.
 validate_optional_revision(Revision) :-
-    must_be(string, Revision),
-    string_length(Revision, Length),
-    Length > 0.
+    normalize_revision(Revision, _).
 
 required(Dict, Key, Value) :-
     (   get_dict(Key, Dict, Value)
