@@ -5,8 +5,8 @@ compose=(docker compose -f docker-compose.replication.yml)
 cleanup(){ "${compose[@]}" logs --no-color || true; "${compose[@]}" down -v || true; }
 trap cleanup EXIT
 wait_http(){ local u="$1"; shift; for _ in $(seq 1 120); do curl -fsS "$@" "$u" >/dev/null && return 0; sleep 1; done; echo "timed out waiting for $u" >&2; return 1; }
-replicate_a_to_b(){ curl -fsS -u admin:admin -X POST http://127.0.0.1:5984/_replicate -H 'content-type: application/json' -d '{"source":"prolog_kb","target":"http://admin:admin@couchdb-b:5984/prolog_kb","create_target":true}'; }
-replicate_b_to_a(){ curl -fsS -u admin:admin -X POST http://127.0.0.1:5985/_replicate -H 'content-type: application/json' -d '{"source":"prolog_kb","target":"http://admin:admin@couchdb-a:5984/prolog_kb","create_target":true}'; }
+replicate_a_to_b(){ curl -fsS -u admin:admin -X POST http://127.0.0.1:5984/_replicate -H 'content-type: application/json' -d '{"source":"http://admin:admin@couchdb-a:5984/prolog_kb","target":"http://admin:admin@couchdb-b:5984/prolog_kb","create_target":true}'; }
+replicate_b_to_a(){ curl -fsS -u admin:admin -X POST http://127.0.0.1:5985/_replicate -H 'content-type: application/json' -d '{"source":"http://admin:admin@couchdb-b:5984/prolog_kb","target":"http://admin:admin@couchdb-a:5984/prolog_kb","create_target":true}'; }
 
 resolve_losing_revisions(){
   local port="$1" id="$2"
