@@ -1,0 +1,3 @@
+*.qlf
+.DS_Store
+.env
