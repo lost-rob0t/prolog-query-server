@@ -1,0 +1,109 @@
+:- module(couchdb,
+          [ ensure_storage/0,
+            health/1,
+            save_document/2,
+            find_kb_documents/2
+          ]).
+
+:- use_module(library(http/http_client)).
+:- use_module(library(http/http_json)).
+:- use_module(library(uri)).
+:- use_module(config).
+
+ensure_storage :-
+    ensure_database,
+    ensure_index.
+
+health(Reply) :-
+    config:couchdb_base_url(URL),
+    request_options(Options),
+    http_get(URL, Reply, [json_object(dict), status_code(Status)|Options]),
+    require_status(Status, [200], Reply).
+
+save_document(Document, Reply) :-
+    ensure_storage,
+    database_url(URL),
+    request_options(Options),
+    http_post(URL,
+              json(Document),
+              Reply,
+              [json_object(dict), status_code(Status)|Options]),
+    require_status(Status, [201, 202], Reply).
+
+find_kb_documents(KB, Documents) :-
+    ensure_storage,
+    find_pages(KB, 500, null, [], Reversed),
+    reverse(Reversed, Documents).
+
+find_pages(KB, Limit, Bookmark, Acc0, Acc) :-
+    find_page(KB, Limit, Bookmark, Page, NextBookmark),
+    reverse(Page, PageReversed),
+    append(PageReversed, Acc0, Acc1),
+    length(Page, Count),
+    (   Count < Limit
+    ->  Acc = Acc1
+    ;   NextBookmark == null
+    ->  Acc = Acc1
+    ;   find_pages(KB, Limit, NextBookmark, Acc1, Acc)
+    ).
+
+find_page(KB, Limit, Bookmark, Documents, NextBookmark) :-
+    database_endpoint('_find', URL),
+    Selector = _{kb:KB,
+                 type:_{'$in':["prolog_fact", "prolog_rule"]}},
+    Base = _{selector:Selector, limit:Limit},
+    (   Bookmark == null
+    ->  Query = Base
+    ;   put_dict(bookmark, Base, Bookmark, Query)
+    ),
+    request_options(Options),
+    http_post(URL,
+              json(Query),
+              Reply,
+              [json_object(dict), status_code(Status)|Options]),
+    require_status(Status, [200], Reply),
+    get_dict(docs, Reply, Documents),
+    (   get_dict(bookmark, Reply, NextBookmark0)
+    ->  NextBookmark = NextBookmark0
+    ;   NextBookmark = null
+    ).
+
+ensure_database :-
+    database_url(URL),
+    request_options(Options),
+    http_put(URL,
+             json(_{}),
+             Reply,
+             [json_object(dict), status_code(Status)|Options]),
+    require_status(Status, [201, 202, 412], Reply).
+
+ensure_index :-
+    database_endpoint('_index', URL),
+    Body = _{index:_{fields:["kb", "type"]},
+             name:"prolog-kb-type",
+             type:"json"},
+    request_options(Options),
+    http_post(URL,
+              json(Body),
+              Reply,
+              [json_object(dict), status_code(Status)|Options]),
+    require_status(Status, [200], Reply).
+
+request_options([timeout(10)|Auth]) :-
+    config:couchdb_auth_options(Auth).
+
+database_url(URL) :-
+    config:couchdb_base_url(Base),
+    config:couchdb_database(Database),
+    uri_encoded(path, Database, EncodedDatabase),
+    format(atom(URL), '~w/~w', [Base, EncodedDatabase]).
+
+database_endpoint(Path, URL) :-
+    database_url(Base),
+    format(atom(URL), '~w/~w', [Base, Path]).
+
+require_status(Status, Allowed, _Reply) :-
+    memberchk(Status, Allowed),
+    !.
+require_status(Status, _Allowed, Reply) :-
+    throw(error(couchdb_error(Status, Reply), _)).
