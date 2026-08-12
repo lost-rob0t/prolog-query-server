@@ -33,16 +33,36 @@ observe_http(Endpoint, Outcome, DurationSeconds) :-
 observe_query(Result, Options) :-
     get_dict(count, Result, Count),
     option(max_solutions(MaxSolutions), Options, 100),
+    solution_limit_hit(Result, Count, MaxSolutions, SolutionLimitHit),
+    depth_limit_hit(Result, DepthLimitHit),
     with_mutex(pqs_metrics,
                ( increment_counter(query_requests, all, 1),
                  increment_counter(query_solutions, all, Count),
                  set_gauge(query_last_solutions, all, Count),
                  set_gauge(query_max_solutions_configured, all, MaxSolutions),
-                 ( Count >= MaxSolutions
-                 -> increment_counter(query_solution_limit_hits, all, 1)
-                 ;  true
-                 )
+                 observe_limit_hit(SolutionLimitHit, query_solution_limit_hits),
+                 observe_limit_hit(DepthLimitHit, query_depth_limit_hits)
                )).
+
+solution_limit_hit(Result, _Count, _MaxSolutions, Hit) :-
+    get_dict(limit_hits, Result, Limits),
+    is_dict(Limits),
+    get_dict(max_solutions, Limits, Hit),
+    !.
+solution_limit_hit(_Result, Count, MaxSolutions, Hit) :-
+    ( Count >= MaxSolutions -> Hit = true ; Hit = false ).
+
+depth_limit_hit(Result, Hit) :-
+    get_dict(limit_hits, Result, Limits),
+    is_dict(Limits),
+    get_dict(max_depth, Limits, Hit),
+    !.
+depth_limit_hit(_Result, false).
+
+observe_limit_hit(true, Counter) :-
+    !,
+    increment_counter(Counter, all, 1).
+observe_limit_hit(_Hit, _Counter).
 
 observe_refresh(Refresh) :-
     (   is_dict(Refresh),
@@ -77,7 +97,8 @@ observe_error(Error) :-
                ( increment_counter(api_errors, all, 1),
                  classify_error(Error, Class),
                  increment_counter(error_class, Class, 1),
-                 observe_couchdb_error(Error)
+                 observe_couchdb_error(Error),
+                 observe_resource_error(Error)
                )).
 
 observe_couchdb_error(error(couchdb_error(409, _), _)) :-
@@ -89,6 +110,35 @@ observe_couchdb_error(error(couchdb_error(_, _), _)) :-
     increment_counter(couchdb_errors, all, 1).
 observe_couchdb_error(_).
 
+observe_resource_error(error(pqs_query_resource(query_timeout, _, _), _)) :-
+    !,
+    increment_counter(query_timeouts, all, 1).
+observe_resource_error(error(pqs_query_resource(inference_budget, _, _), _)) :-
+    !,
+    increment_counter(query_inference_limit_hits, all, 1).
+observe_resource_error(error(pqs_query_resource(proof_limit, _, _), _)) :-
+    !,
+    increment_counter(query_proof_limit_hits, all, 1).
+observe_resource_error(error(pqs_query_cancelled(_), _)) :-
+    !,
+    increment_counter(query_cancellations, all, 1).
+observe_resource_error(error(pqs_resource_limit(request_size, _), _)) :-
+    !,
+    increment_counter(request_size_rejections, all, 1).
+observe_resource_error(error(pqs_resource_limit(document_size, _), _)) :-
+    !,
+    increment_counter(kb_size_rejections, all, 1).
+observe_resource_error(error(pqs_resource_limit(kb_document_count, _), _)) :-
+    !,
+    increment_counter(kb_size_rejections, all, 1).
+observe_resource_error(error(pqs_resource_limit(kb_size, _), _)) :-
+    !,
+    increment_counter(kb_size_rejections, all, 1).
+observe_resource_error(error(pqs_resource_limit(rule_goal_count, _), _)) :-
+    !,
+    increment_counter(kb_size_rejections, all, 1).
+observe_resource_error(_).
+
 increment_knowledge_write(Kind) :-
     with_mutex(pqs_metrics,
                increment_counter(knowledge_writes, Kind, 1)).
@@ -98,6 +148,12 @@ classify_error(error(permission_error(access, api_capability, _), _), authorizat
 classify_error(error(couchdb_error(409, _), _), couchdb_conflict) :- !.
 classify_error(error(couchdb_error(_, _), _), couchdb) :- !.
 classify_error(error(permission_error(activate, invalid_knowledge_release, _), _), invalid_release) :- !.
+classify_error(error(pqs_query_resource(query_timeout, _, _), _), query_timeout) :- !.
+classify_error(error(pqs_query_resource(inference_budget, _, _), _), inference_budget) :- !.
+classify_error(error(pqs_query_resource(proof_limit, _, _), _), proof_limit) :- !.
+classify_error(error(pqs_query_cancelled(_), _), query_cancelled) :- !.
+classify_error(error(pqs_resource_limit(request_size, _), _), request_size) :- !.
+classify_error(error(pqs_resource_limit(_, _), _), resource_limit) :- !.
 classify_error(error(domain_error(_, _), _), domain) :- !.
 classify_error(error(type_error(_, _), _), type) :- !.
 classify_error(_, other).
@@ -164,6 +220,13 @@ counter_metric(http_duration_count, 'pqs_http_request_duration_seconds_count', '
 counter_metric(query_requests, 'pqs_query_requests_total', 'Expert-system queries').
 counter_metric(query_solutions, 'pqs_query_solutions_total', 'Expert-system solutions returned').
 counter_metric(query_solution_limit_hits, 'pqs_query_solution_limit_hits_total', 'Queries reaching configured solution limit').
+counter_metric(query_depth_limit_hits, 'pqs_query_depth_limit_hits_total', 'Queries pruning at configured inference depth').
+counter_metric(query_timeouts, 'pqs_query_timeouts_total', 'Queries terminated by wall-clock deadline').
+counter_metric(query_cancellations, 'pqs_query_cancellations_total', 'Queries cooperatively cancelled').
+counter_metric(query_inference_limit_hits, 'pqs_query_inference_limit_hits_total', 'Queries exhausting inference-step budget').
+counter_metric(query_proof_limit_hits, 'pqs_query_proof_limit_hits_total', 'Queries exhausting proof output budget').
+counter_metric(kb_size_rejections, 'pqs_kb_size_rejections_total', 'Knowledge documents or snapshots rejected by resource limits').
+counter_metric(request_size_rejections, 'pqs_request_size_rejections_total', 'HTTP request bodies rejected by size limit').
 counter_metric(kb_full_reloads, 'pqs_kb_full_reloads_total', 'Full CouchDB knowledge snapshot reloads').
 counter_metric(kb_changes_syncs, 'pqs_kb_changes_syncs_total', 'Incremental CouchDB changes synchronizations').
 counter_metric(kb_changes_seen, 'pqs_kb_changes_seen_total', 'CouchDB changes observed').
