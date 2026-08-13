@@ -13,10 +13,19 @@ The endpoint uses the Prometheus text exposition format and reports:
 - expert-system query count, returned-solution count, and solution-limit hits
 - full KB reload count
 - incremental CouchDB `_changes` sync count and applied/removed change totals
+- completed bounded `_changes` batch count plus gauges for the last sync's batch count and configured maximum batch size
 - coarse API error classes
 - CouchDB error and revision-conflict counts
 - knowledge mutation counts by fixed mutation kind
 - low-cardinality gauges for the most recent query/snapshot/sync size
+
+The bounded catch-up metrics are:
+
+- `pqs_kb_changes_batches_total`
+- `pqs_kb_last_changes_batches`
+- `pqs_kb_changes_batch_size`
+
+They contain no KB, release, document, predicate, or payload-derived labels.
 
 ## Privacy and cardinality boundary
 
@@ -55,7 +64,7 @@ A traced or ordinary query contributes the same operational counters. Proof tree
 `refresh.sync_mode` drives runtime counters:
 
 - `full` increments full-snapshot reload metrics
-- `changes` increments incremental synchronization and applied/removed change metrics
+- `changes` increments incremental synchronization, applied/removed change, and bounded-batch metrics
 
 ## Deployment
 

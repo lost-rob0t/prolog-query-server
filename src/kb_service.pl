@@ -19,6 +19,7 @@
 
 :- use_module(library(option)).
 :- use_module(library(error)).
+:- use_module(config).
 :- use_module(couchdb).
 :- use_module(expert_system).
 
@@ -398,19 +399,22 @@ sync_release_unlocked(RuntimeKB, KB, Release, Stats) :-
     ).
 
 sync_from_changes_unlocked(RuntimeKB, KB, Release, Since, Stats) :-
-    couchdb:changes_since(Since, Changes, LastSequence),
-    apply_changes(Changes,
-                  RuntimeKB,
-                  KB,
-                  Release,
-                  0,
-                  0,
-                  0,
-                  Applied,
-                  Removed,
-                  Ignored),
-    set_kb_sequence(RuntimeKB, LastSequence),
-    length(Changes, Seen),
+    couchdb:ensure_storage,
+    config:changes_batch_size(BatchSize),
+    empty_change_totals(Totals0),
+    sync_change_batches(RuntimeKB,
+                        KB,
+                        Release,
+                        Since,
+                        BatchSize,
+                        Totals0,
+                        LastSequence,
+                        Totals),
+    get_dict(changes_seen, Totals, Seen),
+    get_dict(knowledge_applied, Totals, Applied),
+    get_dict(knowledge_removed, Totals, Removed),
+    get_dict(ignored_changes, Totals, Ignored),
+    get_dict(changes_batches, Totals, Batches),
     Stats = _{reloaded:true,
               synced:true,
               full_reload:false,
@@ -421,7 +425,104 @@ sync_from_changes_unlocked(RuntimeKB, KB, Release, Since, Stats) :-
               changes_seen:Seen,
               knowledge_applied:Applied,
               knowledge_removed:Removed,
-              ignored_changes:Ignored}.
+              ignored_changes:Ignored,
+              changes_batches:Batches,
+              changes_batch_size:BatchSize}.
+
+empty_change_totals(_{changes_seen:0,
+                      knowledge_applied:0,
+                      knowledge_removed:0,
+                      ignored_changes:0,
+                      changes_batches:0}).
+
+sync_change_batches(RuntimeKB,
+                    KB,
+                    Release,
+                    Since,
+                    BatchSize,
+                    Totals0,
+                    LastSequence,
+                    Totals) :-
+    couchdb:changes_page(Since,
+                         BatchSize,
+                         Changes,
+                         NextSequence,
+                         Pending),
+    length(Changes, PageSeen),
+    apply_changes_batch(Changes,
+                        RuntimeKB,
+                        KB,
+                        Release,
+                        NextSequence,
+                        PageApplied,
+                        PageRemoved,
+                        PageIgnored),
+    add_change_totals(Totals0,
+                      PageSeen,
+                      PageApplied,
+                      PageRemoved,
+                      PageIgnored,
+                      Totals1),
+    (   Pending =:= 0
+    ->  LastSequence = NextSequence,
+        Totals = Totals1
+    ;   PageSeen =:= 0
+    ->  LastSequence = NextSequence,
+        Totals = Totals1
+    ;   sync_change_batches(RuntimeKB,
+                            KB,
+                            Release,
+                            NextSequence,
+                            BatchSize,
+                            Totals1,
+                            LastSequence,
+                            Totals)
+    ).
+
+apply_changes_batch(Changes,
+                    RuntimeKB,
+                    KB,
+                    Release,
+                    NextSequence,
+                    Applied,
+                    Removed,
+                    Ignored) :-
+    transaction(( apply_changes(Changes,
+                                RuntimeKB,
+                                KB,
+                                Release,
+                                0,
+                                0,
+                                0,
+                                Applied,
+                                Removed,
+                                Ignored),
+                  set_kb_sequence(RuntimeKB, NextSequence)
+                )).
+
+add_change_totals(Totals0,
+                  Seen,
+                  Applied,
+                  Removed,
+                  Ignored,
+                  Totals) :-
+    get_dict(changes_seen, Totals0, Seen0),
+    get_dict(knowledge_applied, Totals0, Applied0),
+    get_dict(knowledge_removed, Totals0, Removed0),
+    get_dict(ignored_changes, Totals0, Ignored0),
+    get_dict(changes_batches, Totals0, Batches0),
+    Seen1 is Seen0 + Seen,
+    Applied1 is Applied0 + Applied,
+    Removed1 is Removed0 + Removed,
+    Ignored1 is Ignored0 + Ignored,
+    Batches1 is Batches0 + 1,
+    put_dict(_{changes_seen:Seen1,
+               knowledge_applied:Applied1,
+               knowledge_removed:Removed1,
+               ignored_changes:Ignored1,
+               changes_batches:Batches1},
+             Totals0,
+             Totals).
 
 apply_changes([], _RuntimeKB, _KB, _Release,
               Applied, Removed, Ignored,

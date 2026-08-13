@@ -19,6 +19,8 @@ A refresh response reports the path used:
     "knowledge_applied": 1,
     "knowledge_removed": 0,
     "ignored_changes": 0,
+    "changes_batches": 1,
+    "changes_batch_size": 100,
     "last_seq": "..."
   }
 }
@@ -26,17 +28,27 @@ A refresh response reports the path used:
 
 `reloaded` is retained as the compatibility signal that the in-memory runtime was refreshed. `full_reload` and `sync_mode` distinguish a full snapshot rebuild from an incremental changes application.
 
+## Bounded catch-up
+
+The synchronization path fetches `_changes` with `include_docs=true` in bounded pages rather than materializing the complete backlog. `PQS_CHANGES_BATCH_SIZE` controls the maximum requested page size and defaults to `100`.
+
+Each page is applied under the existing per-KB mutex and inside a SWI-Prolog transaction. Runtime clause mutations, loaded-KB byte accounting, and the in-memory CouchDB checkpoint therefore commit together. The checkpoint advances to that page's `last_seq` only after the entire page succeeds.
+
+If a later page fails validation, hits a loaded-KB resource limit, encounters a fail-closed conflict, or is cancelled, that page is rolled back and remains replayable. Pages that completed before a synchronous failure stay committed. Async queries retain the stronger outer query transaction: cancellation rolls back the query's refresh work so no cancelled query exposes a partially applied page or a checkpoint beyond unapplied changes.
+
+Memory used for CouchDB catch-up is proportional to the configured page plus the loaded runtime, not to the total historical changes backlog. The hard `PQS_MAX_KB_DOCUMENTS`, `PQS_MAX_KB_BYTES`, per-document, and rule limits remain authoritative for every page because each matching document still passes through the normal incremental validation/capacity path.
+
 ## Change handling
 
-The synchronization path requests `_changes` with `include_docs=true` and applies changes under the existing per-KB mutex.
+For each bounded page:
 
 - matching fact/rule insert or update: validate, replace any clause from the same CouchDB `_id`, then install the new clause
 - disabled matching document: remove any currently loaded clause for that `_id`
 - deleted document: remove the clause for that `_id`
 - document that no longer belongs to the runtime's KB/release/type: remove any old clause with that `_id` and otherwise ignore it
-- unrelated database changes: ignored after advancing the checkpoint
+- unrelated database changes: ignore them after the page commits and its checkpoint advances
 
-Updates are therefore idempotent by CouchDB document ID and duplicated/replayed changes do not accumulate duplicate Prolog clauses.
+Updates are idempotent by CouchDB document ID and duplicated/replayed changes do not accumulate duplicate Prolog clauses.
 
 ## Full rebuild fallback
 
@@ -56,14 +68,11 @@ This keeps CouchDB as the durable source of truth while avoiding a full knowledg
 
 ## Testing
 
-`tests/changes_sync.sh` runs as its own required CI lane and covers:
+The required CI matrix covers both supported SWI-Prolog variants plus CouchDB E2E behavior. `tests/changes_sync.sh` retains the steady-state synchronization suite and `tests/changes_streaming.sh` verifies:
 
-- initial full snapshot
-- incremental insert
-- direct CouchDB revision update
-- direct CouchDB deletion
-- no-op synchronization from an up-to-date sequence
-- unrelated database changes
-- release switch requiring a new full snapshot
-- synchronization of a previously loaded pinned release
-- restart reconstruction from CouchDB
+- multi-page catch-up with a two-row page budget
+- successful-page commit followed by a later-page rollback
+- replay from the last successful checkpoint after the bad document is corrected
+- final inference equivalence with a fresh full reload
+
+`tests/changes_streaming_tests.pl` deterministically verifies page checkpointing plus conflict and resource-limit rollback. `tests/cancellation_atomicity.sh` uses one-row pages and a long catch-up backlog so async cancellation exercises the changes path while preserving the existing atomicity guarantee. The existing conflict-policy required lane continues to prove unresolved replicated knowledge conflicts fail closed.

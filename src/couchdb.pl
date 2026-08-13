@@ -11,7 +11,7 @@
             get_kb_manifest/2,
             put_kb_manifest/4,
             database_update_seq/1,
-            changes_since/3
+            changes_page/5
           ]).
 
 :- use_module(library(http/http_client)).
@@ -122,25 +122,6 @@ database_update_seq(Sequence) :-
              [json_object(dict), status_code(Status)|Options]),
     require_status(Status, [200], Reply),
     get_dict(update_seq, Reply, Sequence).
-
-changes_since(Since, Changes, LastSequence) :-
-    ensure_storage,
-    changes_pages(Since, 500, [], Reversed, LastSequence),
-    reverse(Reversed, Changes).
-
-changes_pages(Since, Limit, Acc0, Acc, LastSequence) :-
-    changes_page(Since, Limit, Page, NextSequence, Pending),
-    reverse(Page, ReversedPage),
-    append(ReversedPage, Acc0, Acc1),
-    length(Page, Count),
-    (   Pending =:= 0
-    ->  Acc = Acc1,
-        LastSequence = NextSequence
-    ;   Count =:= 0
-    ->  Acc = Acc1,
-        LastSequence = NextSequence
-    ;   changes_pages(NextSequence, Limit, Acc1, Acc, LastSequence)
-    ).
 
 changes_page(Since, Limit, Changes, LastSequence, Pending) :-
     sequence_text(Since, SinceText),
