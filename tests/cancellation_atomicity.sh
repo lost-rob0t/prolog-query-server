@@ -14,6 +14,7 @@ export PQS_MAX_RULE_GOALS=32
 export PQS_MAX_REQUEST_BYTES=1048576
 export PQS_MAX_ACTIVE_QUERIES=2
 export PQS_QUERY_RESULT_TTL_SECONDS=300
+export PQS_CHANGES_BATCH_SIZE=1
 
 cleanup() {
   docker compose logs --no-color || true
@@ -70,11 +71,24 @@ warm=$(curl -fsS http://127.0.0.1:8080/v1/query \
   -d '{"kb":"cancel-atomic","goal":{"predicate":"healthy","args":["yes"]}}')
 printf '%s' "$warm" | python3 -c 'import json,sys; assert json.load(sys.stdin)["count"]==1'
 
-# Add knowledge only in CouchDB. The next async query will sync it inside the
-# same transaction as the runaway inference.
+# Put the matching change first, then add a long unrelated CouchDB backlog.
+# With one-row pages, the worker applies the transient fact early and remains in
+# catch-up long enough for cancellation to land before inference starts.
 curl -fsS http://127.0.0.1:8080/v1/facts \
   -H 'content-type: application/json' \
   -d '{"kb":"cancel-atomic","predicate":"transient","args":["new"]}' >/dev/null
+python3 - <<'PY' >/tmp/cancel-catchup-backlog.json
+import json
+print(json.dumps({
+    "docs": [
+        {"_id": f"cancel-noise-{i:03d}", "type": "noise", "value": i}
+        for i in range(300)
+    ]
+}))
+PY
+curl -fsS -u admin:admin -X POST http://127.0.0.1:5984/prolog_kb/_bulk_docs \
+  -H 'content-type: application/json' \
+  --data-binary @/tmp/cancel-catchup-backlog.json >/dev/null
 
 async=$(curl -fsS -X POST http://127.0.0.1:8080/v1/query \
   -H 'content-type: application/json' \
@@ -82,10 +96,9 @@ async=$(curl -fsS -X POST http://127.0.0.1:8080/v1/query \
 query_id=$(printf '%s' "$async" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["status"]=="queued"; print(d["query_id"])')
 wait_state "$query_id" running /tmp/cancel-atomic-running.json
 
-# Give the fast one-document changes sync time to execute before signalling the
-# intentionally non-terminating inference. The enclosing transaction must roll
-# the synced runtime change back when cancellation is raised.
-sleep 0.1
+# The transient fact is the first pending page. The remaining 300 one-row pages
+# keep the worker in CouchDB catch-up while the cancellation signal is sent.
+sleep 0.05
 cancel=$(curl -fsS -X POST http://127.0.0.1:8080/v1/query/cancel \
   -H 'content-type: application/json' \
   -d "{\"query_id\":\"$query_id\"}")
@@ -93,7 +106,7 @@ printf '%s' "$cancel" | python3 -c 'import json,sys; d=json.load(sys.stdin); ass
 wait_state "$query_id" cancelled /tmp/cancel-atomic-cancelled.json
 
 # With refresh explicitly disabled, the pre-cancellation runtime must remain
-# intact and must not contain the CouchDB-only transient fact.
+# intact and must not contain the early catch-up page that added transient/new.
 old_runtime=$(curl -fsS http://127.0.0.1:8080/v1/query \
   -H 'content-type: application/json' \
   -d '{"kb":"cancel-atomic","refresh":false,"goal":{"predicate":"transient","args":["new"]}}')
@@ -104,10 +117,11 @@ healthy=$(curl -fsS http://127.0.0.1:8080/v1/query \
   -d '{"kb":"cancel-atomic","refresh":false,"goal":{"predicate":"healthy","args":["yes"]}}')
 printf '%s' "$healthy" | python3 -c 'import json,sys; assert json.load(sys.stdin)["count"]==1'
 
-# A later ordinary refresh applies the pending CouchDB fact normally.
+# A later ordinary refresh replays the still-pending sequence and applies the
+# matching fact normally. No cancelled page or checkpoint was leaked.
 refreshed=$(curl -fsS http://127.0.0.1:8080/v1/query \
   -H 'content-type: application/json' \
   -d '{"kb":"cancel-atomic","goal":{"predicate":"transient","args":["new"]}}')
 printf '%s' "$refreshed" | python3 -c 'import json,sys; assert json.load(sys.stdin)["count"]==1'
 
-echo "cancellation rollback leaves the loaded KB atomic and healthy"
+echo "cancellation during paged catch-up leaves the loaded KB atomic and replayable"
