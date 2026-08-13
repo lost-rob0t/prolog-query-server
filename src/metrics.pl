@@ -83,12 +83,17 @@ refresh_metrics("changes", Refresh) :-
     (get_dict(changes_seen, Refresh, Seen) -> true ; Seen = 0),
     (get_dict(knowledge_applied, Refresh, Applied) -> true ; Applied = 0),
     (get_dict(knowledge_removed, Refresh, Removed) -> true ; Removed = 0),
+    (get_dict(changes_batches, Refresh, Batches) -> true ; Batches = 0),
+    (get_dict(changes_batch_size, Refresh, BatchSize) -> true ; BatchSize = 0),
     with_mutex(pqs_metrics,
                ( increment_counter(kb_changes_syncs, all, 1),
                  increment_counter(kb_changes_seen, all, Seen),
                  increment_counter(kb_changes_applied, all, Applied),
                  increment_counter(kb_changes_removed, all, Removed),
-                 set_gauge(kb_last_changes_seen, all, Seen)
+                 increment_counter(kb_changes_batches, all, Batches),
+                 set_gauge(kb_last_changes_seen, all, Seen),
+                 set_gauge(kb_last_changes_batches, all, Batches),
+                 set_gauge(kb_changes_batch_size, all, BatchSize)
                )).
 refresh_metrics(_Mode, _Refresh).
 
@@ -232,6 +237,7 @@ counter_metric(kb_changes_syncs, 'pqs_kb_changes_syncs_total', 'Incremental Couc
 counter_metric(kb_changes_seen, 'pqs_kb_changes_seen_total', 'CouchDB changes observed').
 counter_metric(kb_changes_applied, 'pqs_kb_changes_applied_total', 'Knowledge changes applied to Prolog runtime').
 counter_metric(kb_changes_removed, 'pqs_kb_changes_removed_total', 'Knowledge clauses removed from Prolog runtime').
+counter_metric(kb_changes_batches, 'pqs_kb_changes_batches_total', 'Bounded CouchDB changes batches completed').
 counter_metric(api_errors, 'pqs_api_errors_total', 'API errors').
 counter_metric(error_class, 'pqs_error_class_total', 'API errors by coarse class').
 counter_metric(couchdb_errors, 'pqs_couchdb_errors_total', 'CouchDB errors observed by API').
@@ -244,6 +250,8 @@ gauge_metric(query_last_solutions, 'pqs_query_last_solutions', 'Solutions return
 gauge_metric(query_max_solutions_configured, 'pqs_query_max_solutions_configured', 'Max solutions configured for most recent query').
 gauge_metric(kb_last_snapshot_documents, 'pqs_kb_last_snapshot_documents', 'Documents in most recent full KB snapshot').
 gauge_metric(kb_last_changes_seen, 'pqs_kb_last_changes_seen', 'Changes seen in most recent incremental sync').
+gauge_metric(kb_last_changes_batches, 'pqs_kb_last_changes_batches', 'Batches used by most recent incremental sync').
+gauge_metric(kb_changes_batch_size, 'pqs_kb_changes_batch_size', 'Configured maximum CouchDB changes batch size').
 
 label_text(all, '').
 label_text(endpoint(Endpoint), Text) :-
