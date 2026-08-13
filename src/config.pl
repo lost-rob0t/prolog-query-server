@@ -18,7 +18,8 @@
             max_rule_goals/1,
             max_request_bytes/1,
             max_active_queries/1,
-            query_result_ttl_seconds/1
+            query_result_ttl_seconds/1,
+            changes_batch_size/1
           ]).
 
 server_port(Port) :-
@@ -91,6 +92,9 @@ max_active_queries(Value) :-
 
 query_result_ttl_seconds(Value) :-
     env_positive_integer('PQS_QUERY_RESULT_TTL_SECONDS', 300, Value).
+
+changes_batch_size(Value) :-
+    env_positive_integer('PQS_CHANGES_BATCH_SIZE', 100, Value).
 
 env_required(Name, Value) :-
     (   getenv(Name, Value),
