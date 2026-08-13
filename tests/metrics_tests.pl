@@ -25,7 +25,9 @@ test(records_http_query_refresh_and_write_metrics) :-
     observe_refresh(_{sync_mode:"changes",
                       changes_seen:3,
                       knowledge_applied:2,
-                      knowledge_removed:1}),
+                      knowledge_removed:1,
+                      changes_batches:2,
+                      changes_batch_size:100}),
     increment_knowledge_write(fact_create),
     snapshot(Snapshot),
     counter_value(Snapshot, http_requests, endpoint_outcome(query, success), 1),
@@ -37,10 +39,13 @@ test(records_http_query_refresh_and_write_metrics) :-
     counter_value(Snapshot, kb_changes_seen, all, 3),
     counter_value(Snapshot, kb_changes_applied, all, 2),
     counter_value(Snapshot, kb_changes_removed, all, 1),
+    counter_value(Snapshot, kb_changes_batches, all, 2),
     counter_value(Snapshot, knowledge_writes, fact_create, 1),
     gauge_value(Snapshot, query_last_solutions, all, 2),
     gauge_value(Snapshot, kb_last_snapshot_documents, all, 17),
-    gauge_value(Snapshot, kb_last_changes_seen, all, 3).
+    gauge_value(Snapshot, kb_last_changes_seen, all, 3),
+    gauge_value(Snapshot, kb_last_changes_batches, all, 2),
+    gauge_value(Snapshot, kb_changes_batch_size, all, 100).
 
 test(classifies_couchdb_conflicts) :-
     reset_metrics,
@@ -54,10 +59,18 @@ test(classifies_couchdb_conflicts) :-
 test(prometheus_output_contains_only_registered_labels) :-
     reset_metrics,
     observe_http(query, success, 0.125),
+    observe_refresh(_{sync_mode:"changes",
+                      changes_seen:4,
+                      knowledge_applied:3,
+                      knowledge_removed:1,
+                      changes_batches:2,
+                      changes_batch_size:50}),
     increment_knowledge_write(rule_create),
     prometheus_text(Text),
     sub_atom(Text, _, _, _, 'pqs_http_requests_total{endpoint="query",outcome="success"}'),
     sub_atom(Text, _, _, _, 'pqs_http_request_duration_seconds_sum{endpoint="query"}'),
+    sub_atom(Text, _, _, _, 'pqs_kb_changes_batches_total 2'),
+    sub_atom(Text, _, _, _, 'pqs_kb_changes_batch_size 50'),
     sub_atom(Text, _, _, _, 'pqs_knowledge_writes_total{class="rule_create"}'),
     \+ sub_atom(Text, _, _, _, 'secret-predicate-value').
 
