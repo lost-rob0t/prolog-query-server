@@ -103,6 +103,8 @@ jobs:
       - uses: actions/checkout@v7
       - name: Run incremental CouchDB changes synchronization suite
         run: bash tests/changes_sync.sh
+      - name: Run bounded CouchDB changes catch-up suite
+        run: bash tests/changes_streaming.sh
 
   knowledge-crud:
     name: couchdb-knowledge-crud-e2e
