@@ -11,7 +11,8 @@
             get_kb_manifest/2,
             put_kb_manifest/4,
             database_update_seq/1,
-            changes_since/3
+            changes_since/3,
+            changes_page/5
           ]).
 
 :- use_module(library(http/http_client)).
@@ -123,9 +124,13 @@ database_update_seq(Sequence) :-
     require_status(Status, [200], Reply),
     get_dict(update_seq, Reply, Sequence).
 
+% Retained for callers that explicitly need a materialized list. The server's
+% incremental runtime synchronization consumes changes_page/5 directly so a
+% long catch-up backlog is never accumulated as one in-memory list.
 changes_since(Since, Changes, LastSequence) :-
     ensure_storage,
-    changes_pages(Since, 500, [], Reversed, LastSequence),
+    config:changes_batch_size(Limit),
+    changes_pages(Since, Limit, [], Reversed, LastSequence),
     reverse(Reversed, Changes).
 
 changes_pages(Since, Limit, Acc0, Acc, LastSequence) :-
