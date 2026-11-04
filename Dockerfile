@@ -1,4 +1,4 @@
-FROM swipl:10.1.12
+FROM swipl:10.1.20
 
 WORKDIR /app
 COPY . /app
