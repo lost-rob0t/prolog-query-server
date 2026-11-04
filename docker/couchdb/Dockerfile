@@ -1,4 +1,4 @@
-FROM couchdb:3.5.2.1
+FROM couchdb:3.5.3
 
 USER root
 RUN apt-get update \
